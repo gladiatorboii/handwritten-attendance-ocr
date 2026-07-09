@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual Environment
+venv/
+
+# Real attendance register samples (employee names, phone numbers,
+# handwriting) -- never commit to this public repo.
+inputs/
+samples/
+
+# VS Code
+.vscode/
+
+# Outputs
+outputs/
+debug/
+
+# Temporary files
+*.log
+*.tmp
+
+# Model cache (if any)
+.cache/
+
+# llama_vision experiment: contains real attendance page images/crops
+# and API results -- never commit real employee data or API keys.
+llama_vision/images/
+llama_vision/row_crops/
+llama_vision/results/
+llama_vision/row_crops_meta.json
+
+# Secrets -- never commit API keys.
+.env

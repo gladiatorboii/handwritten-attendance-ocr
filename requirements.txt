@@ -1,0 +1,21 @@
+# Attendance OCR Pipeline (Mistral Document AI OCR + Llama 4 Scout recheck)
+# Pinned to the exact versions this project is tested against -- install
+# with: pip install -r requirements.txt
+
+# Image Processing
+opencv-python==5.0.0.93
+Pillow==10.4.0
+numpy==2.4.4
+
+# PDF Processing
+PyMuPDF==1.28.0
+
+# Fuzzy Matching (status word detection)
+rapidfuzz==3.14.5
+
+# Date/time parsing (post_processing.normalize_time)
+python-dateutil==2.9.0.post0
+
+# Mistral OCR API + Groq (Llama Vision recheck) + .env config
+requests==2.34.2
+python-dotenv==1.2.2
