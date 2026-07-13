@@ -55,8 +55,12 @@ _NON_NAME_LINE = re.compile(
 # header row is the only thing that can tell us where date/in/out live.
 _ROLE_PATTERNS = {
     "date": re.compile(r"date", re.IGNORECASE),
-    "out_time": re.compile(r"\bout\b|time\s*out|check\s*-?\s*out|log\s*-?\s*out", re.IGNORECASE),
-    "in_time": re.compile(r"\bin\b|time\s*in|check\s*-?\s*in|log\s*-?\s*in", re.IGNORECASE),
+    # "outtime"/"intime" (no space) show up when a header cell's two
+    # words get transcribed fused together -- \bout\b/\bin\b alone
+    # require a word boundary on both sides, which a fused word doesn't
+    # have (nothing separates "out" from the "time" right after it).
+    "out_time": re.compile(r"\bout\b|time\s*out|outtime|check\s*-?\s*out|log\s*-?\s*out", re.IGNORECASE),
+    "in_time": re.compile(r"\bin\b|time\s*in|intime|check\s*-?\s*in|log\s*-?\s*in", re.IGNORECASE),
     # "Remark"/"Remand"/"Action" columns carry an overtime / extra-shift
     # code (e.g. "M+B", "M.T Bag") -- "re" alone shows up when OCR
     # truncates "Remark" to just its first two letters.
@@ -469,7 +473,19 @@ class MistralOCREngine:
             # group purely from the shape of every row's values.
             non_separator_lines = [l for l in table_lines if not _SEPARATOR_ROW.match(l)]
             probe_rows = self._split_rows(non_separator_lines)
-            inferred = self._infer_missing_roles({}, probe_rows)
+            # No cap here (unlike the per-group inference below): at this
+            # point nothing about the table is known yet -- no header,
+            # no column boundaries -- so there's no other row range to
+            # scope the probe to. A page with more leading noise lines
+            # before its data starts (e.g. a title line plus a "Page No."
+            # mini-table plus the real header, none of which ever got
+            # recognized as a header) would otherwise dilute a small
+            # fixed-size window below the match-fraction threshold and
+            # lose the whole page, even though the real data rows
+            # comfortably outnumber the noise once all of them are seen.
+            inferred = self._infer_missing_roles(
+                {}, probe_rows, max_probe_rows=len(probe_rows)
+            )
             if "date" not in inferred:
                 return []
 
@@ -937,7 +953,7 @@ class MistralOCREngine:
                 data = resp.json()
                 pages = data.get("pages", [])
                 markdown = pages[0].get("markdown", "") if pages else ""
-                return self._unwrap_caption_json(markdown)
+                return self._convert_html_tables(self._unwrap_caption_json(markdown))
             except requests.exceptions.HTTPError as e:
                 if e.response is None or e.response.status_code not in self._RETRYABLE_STATUS_CODES:
                     raise
@@ -981,6 +997,52 @@ class MistralOCREngine:
             return raw_markdown
 
         return "\n\n".join(captions)
+
+    def _convert_html_tables(self, raw_markdown):
+        """
+        Mistral occasionally renders one table on a page as markdown
+        pipe-syntax and a *different* table on the same page as raw HTML
+        (`<tr><td>...`) instead -- confirmed on a real double-page-spread
+        photo where the second employee's table came back as
+        `<tr><td>...</td></tr>` markup glued directly onto the end of the
+        first table's last markdown row, with no newline separating them
+        at all. `_TABLE_ROW` only recognizes markdown pipe rows, so
+        without this, the HTML table is invisible to the parser entirely
+        (silently losing a whole employee's records), and the markdown
+        row it got glued onto stops matching `_TABLE_ROW` too (it no
+        longer ends in "|"), losing that row as well.
+
+        Converts each `<tr>...</tr>` sequence found anywhere in the text
+        into an equivalent markdown block (header row + separator +
+        data rows) in place, so it flows into the same multi-header
+        parsing `_find_headers` already does for two sequential markdown
+        tables. Leaves the text untouched if no `<tr>` markup is present
+        at all, which is the common case.
+        """
+        match = re.search(r"<tr\b.*?</tr\s*>", raw_markdown, re.IGNORECASE | re.DOTALL)
+        if not match:
+            return raw_markdown
+
+        end = raw_markdown.find("</table>", match.end())
+        span_end = end + len("</table>") if end != -1 else match.end()
+        html_block = raw_markdown[match.start():span_end]
+
+        rows = re.findall(r"<tr\b[^>]*>(.*?)</tr\s*>", html_block, re.IGNORECASE | re.DOTALL)
+        markdown_rows = []
+        for row in rows:
+            cells = re.findall(r"<t[dh]\b[^>]*>(.*?)</t[dh]\s*>", row, re.IGNORECASE | re.DOTALL)
+            if not cells:
+                continue
+            cells = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
+            markdown_rows.append("| " + " | ".join(cells) + " |")
+            if len(markdown_rows) == 1:
+                markdown_rows.append("| " + " | ".join("---" for _ in cells) + " |")
+
+        if not markdown_rows:
+            return raw_markdown
+
+        converted = "\n" + "\n".join(markdown_rows) + "\n"
+        return raw_markdown[:match.start()] + converted + raw_markdown[span_end:]
 
     def _headers(self):
         return {
