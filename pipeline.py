@@ -7,7 +7,7 @@ import shutil
 from PIL import Image
 
 from preprocessing.deskew import deskew_image
-from preprocessing.crop import crop_to_content
+from preprocessing.crop import crop_to_content, crop_header_region
 from validation_engine import ValidationEngine
 from post_processing import process_records
 from html_report import generate_html_report
@@ -137,7 +137,8 @@ class AttendancePipeline:
     def run(
         self,
         input_path,
-        save_output=True
+        save_output=True,
+        progress_callback=None
     ):
 
         total_start = time.perf_counter()
@@ -152,6 +153,12 @@ class AttendancePipeline:
                 print("\n" + "=" * 60)
                 print(f"Processing Page {index}/{len(pages)}")
                 print("=" * 60)
+
+                # Optional -- lets a caller (e.g. api.py's job tracker)
+                # observe progress without this method needing to know
+                # anything about how that caller reports it.
+                if progress_callback:
+                    progress_callback(index, len(pages))
 
                 # A physical page is almost always one set of records, but
                 # occasionally two full tables share one page (see
@@ -227,6 +234,33 @@ class AttendancePipeline:
         base_name = self.mistral_ocr_engine.extract_employee_name(
             self.mistral_ocr_engine.last_markdown
         )
+        employee_code = self.mistral_ocr_engine.extract_employee_code(
+            self.mistral_ocr_engine.last_markdown
+        )
+
+        # Mistral's markdown transcription sometimes garbles the heading
+        # badly enough that neither field-extraction pass above finds
+        # anything at all -- re-OCR'ing just the header crop (rather than
+        # the whole page) gives Mistral a second, more focused look at
+        # exactly that region, which costs one extra call only on the
+        # pages that actually need it. Reuses the same extraction logic
+        # already proven on the full page, just against a smaller image.
+        if not base_name or not employee_code:
+            header_path = os.path.join(
+                PREPROCESSED_DIR,
+                f"header_{os.path.basename(image_path)}"
+            )
+            crop_header_region(deskewed_path, header_path)
+            self.mistral_ocr_engine.run(header_path)
+
+            if not base_name:
+                base_name = self.mistral_ocr_engine.extract_employee_name(
+                    self.mistral_ocr_engine.last_markdown
+                )
+            if not employee_code:
+                employee_code = self.mistral_ocr_engine.extract_employee_code(
+                    self.mistral_ocr_engine.last_markdown
+                )
 
         ocr_time = time.perf_counter() - ocr_start
 
@@ -252,10 +286,20 @@ class AttendancePipeline:
                     label = f"table {block_index + 1}"
                     employee_name = f"{base_name} ({label})" if base_name else f"({label})"
 
+            # Falls back to this block's own repeated signature (already
+            # computed, no extra cost) when nothing above found a name at
+            # all -- confirmed on a real page: the heading had no
+            # separate name text of its own, but the sig column
+            # consistently repeated the employee's name throughout the
+            # table itself.
+            if not employee_name and signature_name:
+                employee_name = signature_name
+
             results.append(self._process_block(
                 deskewed_path,
                 records,
                 employee_name,
+                employee_code,
                 block_hint,
                 deskew_time,
                 ocr_time,
@@ -296,6 +340,7 @@ class AttendancePipeline:
         deskewed_path,
         records,
         employee_name,
+        employee_code,
         block_hint,
         deskew_time,
         ocr_time,
@@ -398,6 +443,7 @@ class AttendancePipeline:
 
         return {
             "employee_name": employee_name,
+            "employee_code": employee_code,
             "total_records": len(records),
             "records": records,
             "timings": timings

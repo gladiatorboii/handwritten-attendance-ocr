@@ -25,6 +25,28 @@ MIN_POLYGON_VERTICES = 4
 MAX_POLYGON_VERTICES = 6
 
 
+# The employee name/code heading always sits in this top slice of the
+# page, above the data table (confirmed across every sample this project
+# has seen) -- generous enough to never cut off a heading that sits
+# slightly lower, since a wider crop costs nothing but a little extra
+# image for the recheck model to look past.
+HEADER_REGION_FRACTION = 0.2
+
+
+def crop_header_region(input_path, output_path):
+    """
+    Crops the top slice of a page image containing the employee
+    name/code heading, so a header-recheck call (see
+    LlamaVisionEngine.recheck_header) can look at just that region
+    instead of the whole page.
+    """
+    image = cv2.imread(input_path)
+    height = image.shape[0]
+    cropped = image[: int(height * HEADER_REGION_FRACTION), :]
+    cv2.imwrite(output_path, cropped)
+    return output_path
+
+
 def crop_to_content(input_path, output_path):
     """
     Crops away the background clutter around a photographed register

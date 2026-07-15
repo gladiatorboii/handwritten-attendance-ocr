@@ -47,6 +47,34 @@ _NON_NAME_LINE = re.compile(
     re.IGNORECASE,
 )
 
+# An employee code is usually introduced by an explicit label right next
+# to it ("emp id- 142810", "Emp: 153588", "empid 142810") -- this is an
+# unambiguous signal, checked before any bare-number guess.
+_EMP_CODE_LABELED = re.compile(
+    r"emp\.?\s*(?:id|code|no)?\s*[:\-]\s*(\d{3,9})", re.IGNORECASE
+)
+
+# When no label exists at all, the code is just a bare number sitting in
+# the heading next to the name (e.g. "(Sub) PINKU CHOUDRAY 14396") --
+# same heading text also carries a phone number, a book/register
+# reference number, the register's own "<Month> <year>" line (e.g. "June
+# 2026" -- confirmed on a real page where the bare-number fallback
+# mistook the plain "2026" for a code), and the employee's own circled
+# serial number, none of which are the code. An employee code observed
+# on real registers this project has seen is always 5-6 digits; a floor
+# of 5 (not 4) rules out a 4-digit calendar year without needing to
+# recognize a year as such, and capping at 9 digits rules out a 10+
+# digit phone number the same way. The 2-digit serial number already
+# falls below the floor on its own.
+_EMP_CODE_BARE = re.compile(r"\b\d{5,9}\b")
+
+# A book/register reference number (e.g. "doob No 9A/1120925") can be the
+# same length as a real employee code -- confirmed on a real page where
+# this sits in the same heading as a genuine (labeled) employee code.
+# Skipped outright during the bare-number fallback so it's never
+# mistaken for one on some other page that lacks a label entirely.
+_NON_CODE_LINE = re.compile(r"\b(?:book|doob|regd?)\.?\s*no\b", re.IGNORECASE)
+
 # Column roles are found by matching each header cell's own text against
 # these keywords, not by assuming a fixed column count/order/exact
 # wording -- different registers label (and order, and count) their
@@ -219,6 +247,39 @@ _HAS_LETTER = re.compile(r"[A-Za-z]")
 # than trying to salvage a "real" name out of the repeated tokens.
 _REPEATED_TOKEN = re.compile(r"\b(\S{1,4})\b(?:[\s.,]+\1\b){3,}", re.IGNORECASE)
 
+# On at least one hard page, Mistral's response body wasn't a name/table
+# transcription at all but a stray vision-model layout annotation (e.g.
+# '[{"box_2d": [0, 0, 998, 998], "label": "table", "caption": "<table>').
+# That text has letters and no repeated token, so it otherwise passed as
+# a plausible name. No real employee name ever contains JSON's structural
+# characters, so reject any candidate that does.
+_NAME_DISALLOWED_CHARS = re.compile(r'[{}\[\]"]')
+
+# A real employee name never contains a run of digits -- a phone number,
+# employee code, or serial number merged into the same cell as the name
+# (confirmed on a real page: "SUP. Pushpendra : 8426035466") is always
+# noise, not part of the name. Floor of 3 so a single stray digit from a
+# misread letter doesn't nuke an otherwise-fine candidate.
+_DIGIT_RUN = re.compile(r"\d{3,}")
+
+# The "Page No." / "Date" mini-table's own column labels, when they get
+# merged into the same line as the name instead of staying on their own
+# row (confirmed on a real page: "(90) Deep Sing. Page No. Date") -- a
+# real name never contains either literally.
+_LABEL_NOISE = re.compile(r"\bpage\s*no\.?\b|\bdate\b", re.IGNORECASE)
+
+# Left behind once a parenthesized serial number's digits are stripped
+# out (e.g. "(77)" -> "()") -- never meaningful on its own.
+_EMPTY_PARENS = re.compile(r"\(\s*\)")
+
+
+def _strip_numeric_noise(text):
+    cleaned = _DIGIT_RUN.sub("", text)
+    cleaned = _LABEL_NOISE.sub("", cleaned)
+    cleaned = _EMPTY_PARENS.sub("", cleaned)
+    cleaned = re.sub(r"^[\s:./\-]+|[\s:./\-]+$", "", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
 # Circled/dingbat digit glyphs Mistral sometimes renders a page number as
 # (e.g. "⑦"), plus plain digits -- stripped from the front of a name
 # candidate since these count as Unicode word characters (so a plain
@@ -231,7 +292,11 @@ def _strip_leading_glyph(text):
 
 
 def _looks_like_name(text):
-    return bool(_HAS_LETTER.search(text)) and not _REPEATED_TOKEN.search(text)
+    return (
+        bool(_HAS_LETTER.search(text))
+        and not _REPEATED_TOKEN.search(text)
+        and not _NAME_DISALLOWED_CHARS.search(text)
+    )
 
 
 def _is_status_noise(text):
@@ -407,12 +472,12 @@ class MistralOCREngine:
                 continue
             candidate = _strip_leading_glyph(stripped.lstrip("#").strip())
             if candidate and _looks_like_name(candidate) and not _NON_NAME_LINE.match(candidate):
-                return candidate.rstrip(".")
+                return _strip_numeric_noise(candidate.rstrip("."))
 
         for line in pre_table_lines:
             candidate = _strip_leading_glyph(line.strip().lstrip("#").strip())
             if candidate and _looks_like_name(candidate) and not _NON_NAME_LINE.match(candidate):
-                return candidate.rstrip(".")
+                return _strip_numeric_noise(candidate.rstrip("."))
 
         # Fallback: name text merged into the first table row -- in any
         # cell, not just the first (an employee code/serial number
@@ -437,7 +502,62 @@ class MistralOCREngine:
                 for cell in cells:
                     candidate = _strip_leading_glyph(cell)
                     if candidate and _looks_like_name(candidate) and not _NON_NAME_LINE.match(candidate):
-                        return candidate.rstrip(".")
+                        return _strip_numeric_noise(candidate.rstrip("."))
+
+        return ""
+
+    def extract_employee_code(self, markdown):
+        """
+        The employee code sits in the same heading area as the name (see
+        extract_employee_name), usually right next to a phone number, a
+        book/register reference number, and/or the employee's own
+        circled serial number -- none of which are the code. Also checks
+        every mini-table row above the real column-header row, not just
+        plain pre-table text: on at least one observed page the whole
+        heading (name, code, phone) got merged into that mini-table
+        instead of appearing as separate text lines, the same place
+        extract_employee_name falls back to.
+        """
+        if not markdown:
+            return ""
+
+        lines = markdown.splitlines()
+        table_start = next((i for i, l in enumerate(lines) if _TABLE_ROW.match(l)), len(lines))
+        pre_table_lines = lines[:table_start]
+
+        code = self._find_code_in_lines(pre_table_lines)
+        if code:
+            return code
+
+        table_lines = [l for l in lines if _TABLE_ROW.match(l)]
+        return self._find_code_in_lines(self._mini_table_lines(table_lines))
+
+    def _mini_table_lines(self, table_lines):
+        """
+        Rows above the real column-header row -- the boundary is
+        whichever row's cells are the first to look like actual column
+        labels (a "date" role plus an "in"/"out" role), same signal
+        extract_employee_name uses to tell a mini-table row from the
+        real header.
+        """
+        for i, line in enumerate(table_lines):
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            roles = _classify_header(cells)
+            if "date" in roles and ("in_time" in roles or "out_time" in roles):
+                return table_lines[:i]
+        return table_lines
+
+    def _find_code_in_lines(self, candidate_lines):
+        labeled = _EMP_CODE_LABELED.search("\n".join(candidate_lines))
+        if labeled:
+            return labeled.group(1)
+
+        for line in candidate_lines:
+            if _NON_CODE_LINE.search(line):
+                continue
+            bare = _EMP_CODE_BARE.search(line)
+            if bare:
+                return bare.group(0)
 
         return ""
 
@@ -567,7 +687,7 @@ class MistralOCREngine:
     def _extract_block_signature_name(self, data_lines, roles, col_range, min_fraction=0.4):
         """
         The page-level name (extract_employee_name) only ever identifies
-        one employee, but when a page holds more than one table (e.g. two
+        one employee, but when +++++a page holds more than one table (e.g. two
         different employees whose physical register pages were
         photographed together, see page3 in early testing -- one table's
         rows all said "Pushpenna" in the sign column while the page's

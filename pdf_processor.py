@@ -9,7 +9,7 @@ from html_report import generate_html_report
 from config import get_output_paths
 
 
-def process_pdf(pipeline, pdf_path):
+def process_pdf(pipeline, pdf_path, progress_callback=None):
 
     total_start = time.perf_counter()
 
@@ -34,6 +34,12 @@ def process_pdf(pipeline, pdf_path):
             print("=" * 50)
             print(f"Processing Page {page_number + 1}/{total_pages}")
             print("=" * 50)
+
+            # Optional -- lets a caller (e.g. api.py's job tracker)
+            # observe progress without this function needing to know
+            # anything about how that caller reports it.
+            if progress_callback:
+                progress_callback(page_number + 1, total_pages)
 
             page = doc.load_page(page_number)
             pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
@@ -66,6 +72,7 @@ def process_pdf(pipeline, pdf_path):
                     employees.append({
                         "page": page_number + 1,
                         "employee_name": result.get("employee_name"),
+                        "employee_code": result.get("employee_code"),
                         "total_records": result.get("total_records", 0),
                         "records": result.get("records", []),
                         "timings": result.get("timings", {})

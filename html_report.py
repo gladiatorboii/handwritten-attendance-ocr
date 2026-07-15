@@ -11,8 +11,14 @@ def _build_row(record):
     date = record.get("date", "")
     remark = (record.get("remark", "") or "").strip()
 
-    cell_highlight = record.get("cell_highlight", {})
-    row_fully_invalid = record.get("row_fully_invalid", False)
+    # cell_highlight is a list of just the flagged cell names (not a
+    # 4-key dict spelling out "false" for every cell that isn't flagged
+    # -- see validation_engine.ValidationEngine._decide_highlights).
+    # row_fully_invalid isn't a separate field anymore either -- derived
+    # here instead, since "all 4 cells flagged" is exactly what that
+    # field always meant.
+    cell_highlight = record.get("cell_highlight", [])
+    row_fully_invalid = len(cell_highlight) == 4
 
     if row_fully_invalid:
         # Every cell is bad — highlight the whole row instead of
@@ -27,10 +33,10 @@ def _build_row(record):
         </tr>
         """
 
-    date_cls = 'class="cell-invalid"' if cell_highlight.get("date") else ""
-    in_cls = 'class="cell-invalid"' if cell_highlight.get("in_time") else ""
-    out_cls = 'class="cell-invalid"' if cell_highlight.get("out_time") else ""
-    status_cls = 'class="cell-invalid"' if cell_highlight.get("status") else ""
+    date_cls = 'class="cell-invalid"' if "date" in cell_highlight else ""
+    in_cls = 'class="cell-invalid"' if "in_time" in cell_highlight else ""
+    out_cls = 'class="cell-invalid"' if "out_time" in cell_highlight else ""
+    status_cls = 'class="cell-invalid"' if "status" in cell_highlight else ""
 
     return f"""
         <tr>
@@ -47,6 +53,7 @@ def generate_single_employee_html(data):
 
     rows = "".join(_build_row(r) for r in data["records"])
     employee = data.get("employee_name") or "Not Detected"
+    employee_code = data.get("employee_code") or ""
 
     return f"""
     <!DOCTYPE html>
@@ -65,7 +72,7 @@ def generate_single_employee_html(data):
     </head>
     <body>
         <h2>Attendance Register Extraction</h2>
-        <h3>Employee Name : {employee}</h3>
+        <h3>Employee Name : {employee}{f" (Code: {employee_code})" if employee_code else ""}</h3>
         <p>Total Records : {data['total_records']}</p>
         <table>
             <tr>
@@ -93,14 +100,16 @@ def generate_multi_employee_html(data):
 
         page = employee_data.get("page", "")
         employee = employee_data.get("employee_name") or "Not Detected"
+        employee_code = employee_data.get("employee_code") or ""
         total_records = employee_data.get("total_records", 0)
         records = employee_data.get("records", [])
 
         rows = "".join(_build_row(r) for r in records)
 
+        code_suffix = f" (Code: {employee_code})" if employee_code else ""
         sections += f"""
         <div class="employee-section">
-            <h3>Page {page} &nbsp;|&nbsp; Employee : {employee} &nbsp;|&nbsp; Total Records : {total_records}</h3>
+            <h3>Page {page} &nbsp;|&nbsp; Employee : {employee}{code_suffix} &nbsp;|&nbsp; Total Records : {total_records}</h3>
             <table>
                 <tr>
                     <th>Date</th>
