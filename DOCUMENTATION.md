@@ -33,20 +33,32 @@ input file (image or PDF)
       |       Edge-based (Canny + morphological closing +
       |       quadrilateral polygon check) auto-crop to the page
       |       boundary, trimming desk/background clutter from a
-      |       phone photo. No-ops (copies the image through
-      |       unchanged) if it can't confidently find a page-shaped
+      |       phone photo. No-ops (plain file copy, not a
+      |       re-encode) if it can't confidently find a page-shaped
       |       contour -- never risks cropping into real content.
       |
       |-- 2. deskew_image()      (preprocessing/deskew.py)
       |       Canny + probabilistic Hough line detection finds the
       |       dominant near-horizontal line angle and rotates the
-      |       image to straighten it. No-ops if no lines are found.
+      |       image to straighten it -- but ONLY when that angle
+      |       exceeds MIN_CORRECTION_DEGREES (3 degrees). Tried
+      |       twice before with no threshold at all and removed both
+      |       times: confirmed on a real page where the "skew" was
+      |       just 0.91 degrees of measurement noise, yet rotating by
+      |       even that much still corrupted column alignment
+      |       (merged an "out" time into the adjacent signature
+      |       column once, split a date across a phantom extra
+      |       column another time). The threshold lets a genuinely
+      |       tilted photo (5-15+ degrees from an unsteady hand)
+      |       still get corrected while leaving an already-straight
+      |       page alone. No-ops (plain file copy) below the
+      |       threshold or if no lines are found.
       |
       |-- 3. MistralOCREngine.run()   (mistral_ocr_engine.py)
       |       The deskewed image goes to Mistral's OCR endpoint.
       |       If it comes back empty, retries once with the
-      |       ORIGINAL undeskewed image -- confirmed empirically
-      |       that deskewing can occasionally make an otherwise
+      |       ORIGINAL untouched image -- confirmed empirically
+      |       that preprocessing can occasionally make an otherwise
       |       legible page unreadable to Mistral even though it
       |       looks fine to the eye.
       |       Returns one or more "blocks" (see 3. below), each
@@ -77,8 +89,8 @@ input file (image or PDF)
       |
       v
  [pipeline.py: _save_output]
-      |  Writes outputs/<input-filename>.json and .html
-      |  (html_report.py renders the human-readable table view)
+      |  Writes outputs/<input-filename>.json and .xlsx
+      |  (excel_report.py renders the human-readable spreadsheet view)
       v
    done
 ```
@@ -152,7 +164,7 @@ Full explanation of the three-stage design (evidence → decision → confidence
   "employee_name": "string",
   "total_records": 0,
   "records": [ /* see below */ ],
-  "timings": { "Deskew": 0.0, "Mistral OCR": 0.0, "Post Processing": 0.0,
+  "timings": { "Crop": 0.0, "Mistral OCR": 0.0, "Post Processing": 0.0,
                "Llama Row Recheck": 0.0, "Final Validation": 0.0, "Page Total": 0.0 }
 }
 ```
@@ -206,7 +218,7 @@ Three fields that existed in earlier versions of this schema were removed as pur
 | File | Responsibility |
 |---|---|
 | `main.py` | Entry point — file picker (tkinter), dispatches to image or PDF flow |
-| `pipeline.py` | Per-page orchestration: crop → deskew → OCR → name resolution → post-processing → recheck → validation → save |
+| `pipeline.py` | Per-page orchestration: crop → OCR → name resolution → post-processing → recheck → validation → save |
 | `pdf_processor.py` | Multi-page PDF driver — renders each page via PyMuPDF, calls into `pipeline.py` per page |
 | `mistral_ocr_engine.py` | Mistral OCR call + all markdown-table parsing (see section 3) |
 | `llama_vision_engine.py` | Llama 4 Scout (Groq) row recheck |
@@ -216,7 +228,6 @@ Three fields that existed in earlier versions of this schema were removed as pur
 | `validation_engine.py` | Full flagging + confidence scoring (see section 5) |
 | `status_detector.py` | Fuzzy-matches LEAVE/WOFF keywords against a row's own text (handles OCR misspellings like "wloff", "1eave") |
 | `preprocessing/crop.py` | Auto-crop a photographed page to its content boundary |
-| `preprocessing/deskew.py` | Straighten a rotated/skewed photo |
 | `html_report.py` | Renders the `.html` report from the JSON structure |
 | `config.py` | API keys (from `.env`), output path derivation (`get_output_paths`) |
 | `constants.py` | Shared status-code vocabulary (`STATUS_WORK`/`STATUS_LEAVE`/`STATUS_WOFF`) |

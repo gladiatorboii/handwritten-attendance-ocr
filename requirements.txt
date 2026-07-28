@@ -16,6 +16,9 @@ rapidfuzz==3.14.5
 # Date/time parsing (post_processing.normalize_time)
 python-dateutil==2.9.0.post0
 
+# Excel report output (excel_report.py)
+openpyxl==3.1.5
+
 # Mistral OCR API + Groq (Llama Vision recheck) + .env config
 requests==2.34.2
 python-dotenv==1.2.2

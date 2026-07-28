@@ -35,7 +35,7 @@ class ValidationEngine:
     OFF_STATUSES = OFF_STATUSES
 
     # yyyy/mm/dd -- matches post_processing.normalize_date's output shape.
-    DATE_PATTERN = re.compile(r"^(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})$")
+    DATE_PATTERN = re.compile(r"^(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})$")
 
     # Date-sequence check (see _flag_date_sequence_issues): how many days
     # a forward gap between two dated rows is allowed to span before it
@@ -519,7 +519,7 @@ class ValidationEngine:
         # was pure overhead. "row_highlight" (== has_issue) and
         # "row_fully_invalid" (== every cell in this list) are dropped
         # entirely as pure duplicates; a caller derives the latter with
-        # len(cell_highlight) == 4 if it needs it (see html_report.py).
+        # len(cell_highlight) == 4 if it needs it (see excel_report.py).
         record["cell_highlight"] = [
             field for field in ("date", "in_time", "out_time", "status")
             if field in hit_fields
@@ -644,7 +644,7 @@ class ValidationEngine:
         if not match:
             return None
 
-        year, month, day = match.groups()
+        day, month, year = match.groups()
         year, month, day = int(year), int(month), int(day)
 
         if not (1 <= day <= 31) or not (1 <= month <= 12):

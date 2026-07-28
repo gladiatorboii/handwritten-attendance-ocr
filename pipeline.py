@@ -4,13 +4,13 @@ import time
 import fitz
 import tempfile
 import shutil
-from PIL import Image
+from PIL import Image, ImageOps
 
 from preprocessing.deskew import deskew_image
 from preprocessing.crop import crop_to_content, crop_header_region
 from validation_engine import ValidationEngine
 from post_processing import process_records
-from html_report import generate_html_report
+from excel_report import generate_excel_report
 from validators import AttendanceValidator
 from mistral_ocr_engine import MistralOCREngine
 from llama_vision_engine import LlamaVisionEngine
@@ -114,12 +114,35 @@ class AttendancePipeline:
 
         Returns [image_path] unchanged if the image isn't wide enough to
         be a double-page spread.
+
+        Corrects the image's own EXIF rotation tag before measuring it --
+        confirmed on a real double-page spread (EXIF Orientation 8) whose
+        raw pixel dimensions were portrait-shaped even though the actual
+        photo was landscape, silently skipping the split below and
+        forcing a single OCR call to read both pages' tables (and both
+        employees' names) at once instead of one focused call per page.
+        PIL/cv2 don't apply EXIF rotation on their own, so every
+        downstream size/crop decision (here and in preprocessing.crop)
+        would otherwise silently see the wrong orientation too.
+
+        Checked via the raw EXIF Orientation tag itself, not by comparing
+        pre/post-transpose image size -- a 180-degree rotation or a pure
+        mirror flip (Orientation 2, 3, or 4) never changes width/height,
+        so a size comparison alone would silently miss exactly those
+        cases and only catch the 90/270-degree ones (5-8) that happen to
+        swap dimensions.
         """
-        with Image.open(image_path) as img:
+        with Image.open(image_path) as raw:
+            orientation = raw.getexif().get(0x0112, 1)  # standard EXIF Orientation tag ID
+            img = ImageOps.exif_transpose(raw) if orientation != 1 else raw
             width, height = img.size
 
             if width / height < self.DOUBLE_PAGE_ASPECT_RATIO:
-                return [image_path]
+                if orientation == 1:
+                    return [image_path]
+                corrected_path = os.path.join(temp_dir, os.path.basename(image_path))
+                img.convert("RGB").save(corrected_path)
+                return [corrected_path]
 
             mid = width // 2
             left = img.crop((0, 0, mid, height)).convert("RGB")
@@ -222,10 +245,10 @@ class AttendancePipeline:
         blocks = self.mistral_ocr_engine.run(deskewed_path)
 
         if not blocks:
-            # Confirmed by direct observation on a real page: deskewing
+            # Confirmed by direct observation on a real page: preprocessing
             # can occasionally make an otherwise perfectly legible page
-            # unreadable to Mistral even though the deskewed image looks
-            # fine to the eye -- the original, undeskewed image OCR'd
+            # unreadable to Mistral even though the processed image looks
+            # fine to the eye -- the original, untouched image OCR'd
             # correctly on the exact same page. Retrying with the
             # original before giving up on the page entirely costs one
             # extra call only on the rare page that comes back empty.
@@ -459,7 +482,7 @@ class AttendancePipeline:
                 "employees": results
             }
 
-        output_json, output_html = get_output_paths(input_path)
+        output_json, output_excel = get_output_paths(input_path)
 
         os.makedirs(os.path.dirname(output_json), exist_ok=True)
 
@@ -475,15 +498,7 @@ class AttendancePipeline:
                 indent=4
             )
 
-        html = generate_html_report(structure)
-
-        with open(
-            output_html,
-            "w",
-            encoding="utf-8"
-        ) as f:
-
-            f.write(html)
+        generate_excel_report(structure, output_excel)
 
     def _cleanup(self, temp_dir):
         if temp_dir and os.path.exists(temp_dir):

@@ -1,3 +1,5 @@
+import shutil
+
 import cv2
 
 from config import debug_print
@@ -97,15 +99,20 @@ def crop_to_content(input_path, output_path):
             break
 
     if candidate is None:
+        # A plain file copy, not cv2.imread/imwrite's decode-and-re-encode
+        # round-trip -- confirmed on a real page that the re-encode alone
+        # (even with nothing actually cropped) degraded the image just
+        # enough to make Mistral merge two adjacent table columns that
+        # OCR'd as separate on the untouched original.
         debug_print("crop_to_content: no quadrilateral page-shaped contour found, skipping crop")
-        cv2.imwrite(output_path, image)
+        shutil.copy(input_path, output_path)
         return output_path
 
     x, y, w, h = candidate
 
     if w >= image_w * (1 - MIN_REDUCTION_FRACTION) and h >= image_h * (1 - MIN_REDUCTION_FRACTION):
         debug_print("crop_to_content: detected boundary already fills the frame, skipping crop")
-        cv2.imwrite(output_path, image)
+        shutil.copy(input_path, output_path)
         return output_path
 
     pad_x = int(w * PADDING_FRACTION)

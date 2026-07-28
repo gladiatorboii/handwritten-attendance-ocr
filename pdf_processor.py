@@ -5,7 +5,7 @@ import time
 import tempfile
 import shutil
 
-from html_report import generate_html_report
+from excel_report import generate_excel_report
 from config import get_output_paths
 
 
@@ -87,17 +87,14 @@ def process_pdf(pipeline, pdf_path, progress_callback=None):
         "employees": employees
     }
 
-    output_json, output_html = get_output_paths(pdf_path)
+    output_json, output_excel = get_output_paths(pdf_path)
 
     os.makedirs(os.path.dirname(output_json), exist_ok=True)
 
     with open(output_json, "w", encoding="utf-8") as f:
         json.dump(final_result, f, indent=4)
 
-    html = generate_html_report(final_result)
-
-    with open(output_html, "w", encoding="utf-8") as f:
-        f.write(html)
+    generate_excel_report(final_result, output_excel)
 
     pipeline.print_timing_summary(employees, time.perf_counter() - total_start)
 

@@ -6,10 +6,11 @@ from config import debug_print
 
 def normalize_date(date_str):
     """
-    Output is YYYY-MM-DD -- registers themselves are always written
+    Output is DD-MM-YYYY -- registers themselves are always written
     DD/MM/YY(YY) (confirmed across every sample this project has seen),
     so parsing still reads the source in that order; only the returned
-    string's field order, separator, and year width change.
+    string's separator and year width change (day/month order is kept
+    as-written).
     """
     if not date_str:
         return ""
@@ -58,7 +59,7 @@ def normalize_date(date_str):
     if len(year) == 2:
         year = "20" + year
 
-    return f"{year}-{month}-{day}"
+    return f"{day}-{month}-{year}"
 
 
 def normalize_time(time_str):
@@ -131,9 +132,9 @@ def normalize_status(status):
     status = str(status).strip().upper()
 
     mapping = {
-        STATUS_WORK: STATUS_WORK,
-        STATUS_LEAVE: STATUS_LEAVE,
-        STATUS_WOFF: STATUS_WOFF,
+        STATUS_WORK.upper(): STATUS_WORK,
+        STATUS_LEAVE.upper(): STATUS_LEAVE,
+        STATUS_WOFF.upper(): STATUS_WOFF,
         "W/OFF": STATUS_WOFF,
         "WEEK OFF": STATUS_WOFF,
         "WEEKOFF": STATUS_WOFF,

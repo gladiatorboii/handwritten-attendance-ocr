@@ -43,15 +43,41 @@ _NON_NAME_LINE = re.compile(
     r"^\s*(page\s*no\.?|date)\s*[:.]?\s*\d*\s*$"
     r"|^\s*[\W\d]*\s*$"                      # blank / punctuation-only / circled page numbers
     r"|^\s*(january|february|march|april|may|june|july|august|september|"
-    r"october|november|december)\s+\d{4}\s*$",
+    r"october|november|december)\s+\d{4}\s*$"
+    # A bare "Mob No"/"Phone"/"Contact No" label, on its own line, sitting
+    # in the same heading area as the real name -- confirmed on a real
+    # page where "mob No" alone (the phone-number field's own label, not
+    # a number) passed every other name-shape check and was returned as
+    # the employee's name outright.
+    r"|^\s*(mob(?:ile)?|ph(?:one)?|contact)\.?\s*no\.?\s*[:.]?\s*\d*\s*$",
     re.IGNORECASE,
 )
+
+# A bare "Date" line marking the second row of the "Page No." / "Date"
+# mini-table (see _NON_NAME_LINE) -- used on its own, as an anchor: the
+# line right before it is that same mini-table's own "Page No." label,
+# even when OCR garbles that label into something that doesn't literally
+# match _NON_NAME_LINE (confirmed on a real page: "Page No." misread as
+# "Type No.", which passed every other name-shape check and, under the
+# "prefer the last candidate" rule, wrongly overwrote a real name found
+# earlier on the same page).
+_BARE_DATE_LABEL = re.compile(r"^\s*date\s*[:.]?\s*$", re.IGNORECASE)
+
+# A "Page No." / "Date" mini-table's own label sometimes merges into the
+# real table's header row (e.g. "Page No. Date Sig") instead of staying
+# on its own separate line -- confirmed on a real page where this made
+# _find_group_ranges mistake it for a second employee's table starting
+# there, splitting the real single table in two and stranding the
+# genuine out-time column in the discarded second "block". A cell's own
+# "date" match doesn't count as a second block's start when the same
+# cell also carries this label.
+_PAGE_NO_MERGED = re.compile(r"page\s*no\.?", re.IGNORECASE)
 
 # An employee code is usually introduced by an explicit label right next
 # to it ("emp id- 142810", "Emp: 153588", "empid 142810") -- this is an
 # unambiguous signal, checked before any bare-number guess.
 _EMP_CODE_LABELED = re.compile(
-    r"emp\.?\s*(?:id|code|no)?\s*[:\-]\s*(\d{3,9})", re.IGNORECASE
+    r"emp\.?\s*(?:id|code|no)?\s*[:\-]\s*(\d{5,7})", re.IGNORECASE
 )
 
 # When no label exists at all, the code is just a bare number sitting in
@@ -65,8 +91,12 @@ _EMP_CODE_LABELED = re.compile(
 # of 5 (not 4) rules out a 4-digit calendar year without needing to
 # recognize a year as such, and capping at 9 digits rules out a 10+
 # digit phone number the same way. The 2-digit serial number already
-# falls below the floor on its own.
-_EMP_CODE_BARE = re.compile(r"\b\d{5,9}\b")
+# falls below the floor on its own. Tightened to a 7-digit ceiling (was
+# 9) per an explicit statement that every real code on these registers
+# is 5-7 digits -- narrows the window further so an 8-9 digit stray
+# number (a partial phone number, a book/register reference) can no
+# longer be mistaken for one.
+_EMP_CODE_BARE = re.compile(r"\b\d{5,7}\b")
 
 # A book/register reference number (e.g. "doob No 9A/1120925") can be the
 # same length as a real employee code -- confirmed on a real page where
@@ -81,6 +111,18 @@ _NON_CODE_LINE = re.compile(r"\b(?:book|doob|regd?)\.?\s*no\b", re.IGNORECASE)
 # columns differently (e.g. "Date | In time | Sign | Out time | Sign"
 # vs "SNo | Date | IN | sig | OUT | sig | Rem"), so the table's own
 # header row is the only thing that can tell us where date/in/out live.
+# A serial-number label sometimes gets merged into the same header cell
+# as "Date" (e.g. "S.No Date") instead of staying in its own cell like
+# "SNo | Date" -- confirmed on a real page where the data rows still
+# kept them as two separate cells, so the header's own cell index no
+# longer lines up with where the date value actually lives one column
+# over. Checked in _classify_header, not folded into _ROLE_PATTERNS
+# itself, since this shifts the assigned index rather than just
+# detecting a role.
+_SERIAL_DATE_MERGE = re.compile(
+    r"^\s*s[lr]?\.?\s*no\.?\s+date", re.IGNORECASE
+)
+
 _ROLE_PATTERNS = {
     "date": re.compile(r"date", re.IGNORECASE),
     # "outtime"/"intime" (no space) show up when a header cell's two
@@ -139,6 +181,26 @@ _DATE_TIME_MERGED_PATTERN = re.compile(
 # the table parser's own "|" cell delimiter (see _repair_pipe_split_date).
 _NUMERIC_FRAGMENT = re.compile(r"^\d{1,4}$")
 
+# A day cell sometimes sits in its own column while month+year end up
+# merged into the very next cell with a plain space instead of a real
+# separator (e.g. "05 26") -- confirmed on a real page. Recognized as
+# its own fragment shape (see _repair_pipe_split_date) since a bare
+# _NUMERIC_FRAGMENT match requires no whitespace at all.
+_SPACE_SEPARATED_FRAGMENT = re.compile(r"^\d{1,2}\s+\d{2,4}$")
+
+# A remark only ever means "this employee worked more than one shift the
+# same day", written as each shift's single-letter code joined by "+"
+# (e.g. "A+B" for two shifts, "A+B+C" for three) -- never free text. This
+# is deliberately a \b-bounded single-letter run, not just "contains a
+# +": a real remark cell sometimes has other text merged in with it (see
+# the "Pinky M+B" case below, where only "M+B" is the real remark and
+# "Pinky" is a signature that bled into the same cell), and some other
+# non-remark text coincidentally containing a "+" (e.g. "M+Bag") isn't
+# this shape at all -- "Bag" is a whole word, not a single shift-code
+# letter, so the trailing \b never lands right after a lone letter and
+# the match fails outright.
+_SHIFT_CODE_REMARK = re.compile(r"\b([A-Za-z](?:\+[A-Za-z])+)\b")
+
 # Mistral sometimes represents a visibly crossed-out/struck-through cell
 # using markdown strikethrough syntax in its transcription. This is not
 # a reliable signal -- confirmed empirically that the same kind of
@@ -164,7 +226,10 @@ def _classify_header(cells):
         if not text:
             continue
         if "date" not in roles and _ROLE_PATTERNS["date"].search(text):
-            roles["date"] = idx
+            if _SERIAL_DATE_MERGE.match(text):
+                roles["date"] = idx + 1
+            else:
+                roles["date"] = idx
         elif "out_time" not in roles and _ROLE_PATTERNS["out_time"].search(text):
             roles["out_time"] = idx
         elif "in_time" not in roles and _ROLE_PATTERNS["in_time"].search(text):
@@ -189,7 +254,10 @@ def _find_group_ranges(cells):
     repeats before every block's "Date", not just the first one.
     """
     date_positions = [
-        i for i, c in enumerate(cells) if c.strip() and _ROLE_PATTERNS["date"].search(c.strip())
+        i for i, c in enumerate(cells)
+        if c.strip()
+        and _ROLE_PATTERNS["date"].search(c.strip())
+        and not _PAGE_NO_MERGED.search(c.strip())
     ]
     if len(date_positions) <= 1:
         return [(0, len(cells))]
@@ -272,11 +340,35 @@ _LABEL_NOISE = re.compile(r"\bpage\s*no\.?\b|\bdate\b", re.IGNORECASE)
 # out (e.g. "(77)" -> "()") -- never meaningful on its own.
 _EMPTY_PARENS = re.compile(r"\(\s*\)")
 
+# A "(Sub)" designation tag -- marking a substitute/temporary worker --
+# sits right next to the real name on some registers (e.g. "(SUB) PINKU
+# CHOUDHARY") and isn't part of the name itself, unlike a stray "("/")"
+# pair that just wrapped around part of the name during OCR (see the
+# bare-parens strip below, which keeps that text instead of discarding it).
+_NOISE_TAG = re.compile(r"\(\s*sub\s*\)", re.IGNORECASE)
+
+# A trade/grade code ("MST", "M.S.T", "MS") sits next to the name on some
+# registers, sometimes with its own small serial number right in front of
+# it (e.g. "(7) MST", "Deepak Choubray 1 MS", "M.S.T Pavi Kumar") --
+# confirmed on real pages where this leaked in as either a prefix or a
+# suffix. The optional leading digit/parens only get consumed as part of
+# this same match (not stripped on their own), since a bare 1-2 digit
+# number elsewhere in a name candidate is usually a genuine OCR artifact
+# of something else, not this specific code.
+_TRADE_CODE_NOISE = re.compile(r"\(?\s*\d{0,2}\s*\)?\s*m\.?\s*s\.?\s*t?\.?\b", re.IGNORECASE)
+
 
 def _strip_numeric_noise(text):
     cleaned = _DIGIT_RUN.sub("", text)
     cleaned = _LABEL_NOISE.sub("", cleaned)
+    cleaned = _NOISE_TAG.sub("", cleaned)
+    cleaned = _TRADE_CODE_NOISE.sub("", cleaned)
     cleaned = _EMPTY_PARENS.sub("", cleaned)
+    # Whatever's left in parens is real name text a ruled box or stray
+    # mark caused Mistral to wrap in "(" ")" (e.g. "PINKU (HOUDRAY)" for
+    # a single handwritten surname) -- drop just the punctuation, not the
+    # letters inside it.
+    cleaned = cleaned.replace("(", "").replace(")", "")
     cleaned = re.sub(r"^[\s:./\-]+|[\s:./\-]+$", "", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
 
@@ -297,6 +389,24 @@ def _looks_like_name(text):
         and not _REPEATED_TOKEN.search(text)
         and not _NAME_DISALLOWED_CHARS.search(text)
     )
+
+
+def _is_name_candidate(text):
+    """
+    Column-header vocabulary (date/in/out/remark) leaking into the
+    heading region above the table is never the employee's name --
+    confirmed on a real page where "Remand" (OCR's misread of the
+    "Remark" column header) sat on its own line above the real name,
+    and passed every other name-shape check on its own. A book/register
+    reference line (see _NON_CODE_LINE) is excluded the same way -- one
+    such line sat right after a real name and would otherwise have won
+    under the "prefer the last candidate" rule below it.
+    """
+    if not text or not _looks_like_name(text) or _NON_NAME_LINE.match(text):
+        return False
+    if _NON_CODE_LINE.search(text):
+        return False
+    return not any(pattern.search(text) for pattern in _ROLE_PATTERNS.values())
 
 
 def _is_status_noise(text):
@@ -458,26 +568,49 @@ class MistralOCREngine:
         stronger signal when one exists at all; falling back to the first
         plausible plain line only when no heading is present doesn't
         regress pages that never have a heading in the first place.
+
+        Within the plain-line and table-row fallbacks, the LAST plausible
+        candidate wins, not the first -- confirmed on a real page where
+        the heading was written as several separate lines ("23931",
+        "Remand", "(sub)", "PINKU Chaudhry", phone, code) with noise
+        ahead of the real name rather than after it: a stray reference
+        number, then "Remand" (OCR's misread of the "Remark" column
+        header leaking in above the table), before the actual name.
+        Every other sample seen so far has had only one plausible
+        candidate at all, so preferring the last one doesn't change any
+        of those results.
         """
         if not markdown:
             return ""
 
         lines = markdown.splitlines()
         table_start = next((i for i, l in enumerate(lines) if _TABLE_ROW.match(l)), len(lines))
-        pre_table_lines = lines[:table_start]
+        pre_table_lines = list(lines[:table_start])
+
+        for i, line in enumerate(pre_table_lines):
+            if _BARE_DATE_LABEL.match(line.strip()):
+                pre_table_lines[i] = ""
+                for j in range(i - 1, -1, -1):
+                    if pre_table_lines[j].strip():
+                        pre_table_lines[j] = ""
+                        break
+                break
 
         for line in pre_table_lines:
             stripped = line.strip()
             if not stripped.startswith("#"):
                 continue
             candidate = _strip_leading_glyph(stripped.lstrip("#").strip())
-            if candidate and _looks_like_name(candidate) and not _NON_NAME_LINE.match(candidate):
+            if _is_name_candidate(candidate):
                 return _strip_numeric_noise(candidate.rstrip("."))
 
+        found = ""
         for line in pre_table_lines:
             candidate = _strip_leading_glyph(line.strip().lstrip("#").strip())
-            if candidate and _looks_like_name(candidate) and not _NON_NAME_LINE.match(candidate):
-                return _strip_numeric_noise(candidate.rstrip("."))
+            if _is_name_candidate(candidate):
+                found = candidate
+        if found:
+            return _strip_numeric_noise(found.rstrip("."))
 
         # Fallback: name text merged into the first table row -- in any
         # cell, not just the first (an employee code/serial number
@@ -499,10 +632,13 @@ class MistralOCREngine:
             )
 
             if not is_header_row:
+                found = ""
                 for cell in cells:
                     candidate = _strip_leading_glyph(cell)
-                    if candidate and _looks_like_name(candidate) and not _NON_NAME_LINE.match(candidate):
-                        return _strip_numeric_noise(candidate.rstrip("."))
+                    if _is_name_candidate(candidate):
+                        found = candidate
+                if found:
+                    return _strip_numeric_noise(found.rstrip("."))
 
         return ""
 
@@ -552,14 +688,20 @@ class MistralOCREngine:
         if labeled:
             return labeled.group(1)
 
+        # Last bare match wins, not the first -- confirmed on a real page
+        # where a stray reference number ("23931") sat on its own line
+        # above the real code ("14326"), which only appeared later, next
+        # to the phone number. Every other sample seen so far has had
+        # only one bare candidate at all, so this doesn't change those.
+        found = ""
         for line in candidate_lines:
             if _NON_CODE_LINE.search(line):
                 continue
             bare = _EMP_CODE_BARE.search(line)
             if bare:
-                return bare.group(0)
+                found = bare.group(0)
 
-        return ""
+        return found
 
     # ------------------------------------------------------------------
     # MARKDOWN TABLE PARSING
@@ -894,7 +1036,9 @@ class MistralOCREngine:
         expected date position doesn't look like a full date but merging
         it with the next 1-2 short numeric cells would, merge them back
         into one date value (and drop the now-absorbed extra cells, so
-        every later column index lines up with the header again).
+        every later column index lines up with the header again) -- this
+        genuinely shrinks the row, which is correct here since the
+        header was never split this way in the first place.
         """
         if date_idx is None or date_idx >= len(cells):
             return cells
@@ -910,6 +1054,23 @@ class MistralOCREngine:
             merged_date = "/".join(f.strip() for f in fragment)
             if _DATE_VALUE_PATTERN.match(merged_date):
                 return cells[:date_idx] + [merged_date] + cells[date_idx + 1 + extra:]
+
+        # A day cell sitting alone with month+year merged into the very
+        # next cell by a plain space instead of a real separator (e.g.
+        # "01" then "05 26") is a genuine column in this table's own
+        # structure, not a "|"-delimiter artifact -- confirmed on a real
+        # page where the header itself has a matching (blank) cell in
+        # that same position. Blanking the absorbed cell instead of
+        # removing it, unlike the fragment case above, keeps this row's
+        # cell count matching the header's, so every later column index
+        # (in_time, out_time, ...) still lines up correctly.
+        if date_idx + 1 < len(cells):
+            day = cells[date_idx].strip()
+            month_year = cells[date_idx + 1].strip()
+            if _NUMERIC_FRAGMENT.match(day) and _SPACE_SEPARATED_FRAGMENT.match(month_year):
+                merged_date = f"{day}/{'/'.join(month_year.split())}"
+                if _DATE_VALUE_PATTERN.match(merged_date):
+                    return cells[:date_idx] + [merged_date, ""] + cells[date_idx + 2:]
 
         return cells
 
@@ -986,19 +1147,23 @@ class MistralOCREngine:
             in_time = "" if _is_noise_cell(raw_in) else raw_in
             out_time = "" if _is_noise_cell(raw_out) else raw_out
 
-            remark = cell_at(remark_idx).strip() if remark_idx is not None else ""
+            remark_cell = cell_at(remark_idx).strip() if remark_idx is not None else ""
+            remark_match = _SHIFT_CODE_REMARK.search(remark_cell) if remark_cell else None
+            remark = remark_match.group(1) if remark_match else ""
+
             if not remark:
                 # No dedicated remark column (or this row's cell in it
-                # was blank) -- an overtime/extra-shift code sometimes
-                # bleeds into another column instead (e.g. a signature
-                # cell reading "Pinky M+B" rather than just "Pinky"),
-                # recognizable by a "+"-joined code pattern regardless of
-                # which column it landed in.
+                # didn't hold a real shift-code) -- an extra-shift code
+                # sometimes bleeds into another column instead (e.g. a
+                # signature cell reading "Pinky M+B" rather than just
+                # "Pinky"), recognizable by the same shift-code shape
+                # regardless of which column it landed in.
                 for idx in range(start, min(end, len(cells))):
                     if idx in claimed:
                         continue
-                    if "+" in cells[idx]:
-                        remark = cells[idx].strip()
+                    match = _SHIFT_CODE_REMARK.search(cells[idx])
+                    if match:
+                        remark = match.group(1)
                         break
 
             row_data = {

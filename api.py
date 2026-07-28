@@ -20,6 +20,7 @@ Run with:
 
 Interactive API docs (Swagger UI) are then available at /docs.
 """
+import base64
 import os
 import shutil
 import tempfile
@@ -29,7 +30,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from pipeline import AttendancePipeline
@@ -99,7 +100,7 @@ _jobs = {}
 _jobs_lock = threading.Lock()
 
 
-def _run_job(job_id, saved_path, temp_dir, extension, include_html):
+def _run_job(job_id, saved_path, temp_dir, extension, include_excel):
     def report_progress(current_page, total_pages):
         with _jobs_lock:
             if job_id in _jobs:
@@ -111,11 +112,16 @@ def _run_job(job_id, saved_path, temp_dir, extension, include_html):
         else:
             result = pipeline.run(saved_path, progress_callback=report_progress)
 
-        if include_html:
-            output_json, output_html = get_output_paths(saved_path)
-            if os.path.exists(output_html):
-                with open(output_html, encoding="utf-8") as f:
-                    result = {**result, "html_report": f.read()}
+        if include_excel:
+            # Binary, unlike the old HTML report -- base64-encoded so it
+            # still fits in the same JSON job-status body rather than
+            # requiring callers to always use GET /report/{filename}
+            # separately just to get the spreadsheet.
+            output_json, output_excel = get_output_paths(saved_path)
+            if os.path.exists(output_excel):
+                with open(output_excel, "rb") as f:
+                    encoded = base64.b64encode(f.read()).decode("ascii")
+                result = {**result, "excel_report_base64": encoded}
 
         with _jobs_lock:
             _jobs[job_id] = {"status": "completed", "result": result}
@@ -127,7 +133,7 @@ def _run_job(job_id, saved_path, temp_dir, extension, include_html):
 
 
 @app.post("/extract", status_code=202)
-def extract(background_tasks: BackgroundTasks, file: UploadFile = File(...), include_html: bool = False):
+def extract(background_tasks: BackgroundTasks, file: UploadFile = File(...), include_excel: bool = False):
     """
     Upload one attendance register (PDF, JPG, JPEG, or PNG). Returns
     immediately with a job_id and status "processing" -- the actual
@@ -162,7 +168,7 @@ def extract(background_tasks: BackgroundTasks, file: UploadFile = File(...), inc
     with _jobs_lock:
         _jobs[job_id] = {"status": "processing", "progress": "Starting..."}
 
-    background_tasks.add_task(_run_job, job_id, saved_path, temp_dir, extension, include_html)
+    background_tasks.add_task(_run_job, job_id, saved_path, temp_dir, extension, include_excel)
 
     return {"job_id": job_id, "status": "processing"}
 
@@ -183,16 +189,19 @@ def get_extract_status(job_id: str):
     return {"job_id": job_id, **job}
 
 
-@app.get("/report/{filename}", response_class=HTMLResponse)
+@app.get("/report/{filename}")
 def get_report(filename: str):
     """
-    Fetches a previously generated HTML report by output filename (the
-    stem returned in a prior /extract call's saved output, e.g. the
-    UUID request_id) -- an alternative to include_html=true when the
+    Downloads a previously generated Excel report by output filename
+    (the stem returned in a prior /extract call's saved output, e.g. the
+    UUID request_id) -- an alternative to include_excel=true when the
     caller wants the report fetched separately from the extraction call.
     """
-    output_json, output_html = get_output_paths(filename)
-    if not os.path.exists(output_html):
+    output_json, output_excel = get_output_paths(filename)
+    if not os.path.exists(output_excel):
         raise HTTPException(status_code=404, detail="Report not found")
-    with open(output_html, encoding="utf-8") as f:
-        return f.read()
+    return FileResponse(
+        output_excel,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=os.path.basename(output_excel),
+    )

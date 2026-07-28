@@ -38,7 +38,7 @@ python main.py
 A file picker opens — select any `.pdf`, `.jpg`, `.jpeg`, or `.png` attendance register. The pipeline processes it and writes two output files named after the input file:
 
 - `outputs/<filename>.json` — structured records with full per-cell validation/confidence detail
-- `outputs/<filename>.html` — a readable table report, one section per employee/page
+- `outputs/<filename>.xlsx` — a readable spreadsheet report, one section per employee/page
 
 Dates and times are saved exactly as OCR'd — nothing is forced/corrected against an assumed month or year.
 
@@ -50,7 +50,7 @@ For deployment on a company server instead of a desktop file picker, `api.py` ex
 uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
-- `POST /extract` — upload a file (form field `file`) and get back the same JSON structure `main.py` writes to disk. Add `?include_html=true` to also get the rendered report as an `html_report` string field in the response.
+- `POST /extract` — upload a file (form field `file`) and get back the same JSON structure `main.py` writes to disk. Add `?include_excel=true` to also get the rendered report as a base64-encoded `excel_report_base64` string field in the response.
 - `GET /health` — health check.
 - `GET /docs` — interactive Swagger UI (auto-generated), useful for testing without writing a client.
 
@@ -69,8 +69,8 @@ Each request saves its upload under a unique temp name, so concurrent requests �
 | `recheck_utils.py` | Engine-agnostic outlier detection / "does this row need a recheck" logic |
 | `validation_engine.py` | Per-cell/per-row flagging and confidence scoring |
 | `post_processing.py` | Date/time/status string normalization |
-| `preprocessing/` | Image crop-to-content and deskew |
-| `html_report.py` | Renders the `.html` report |
+| `preprocessing/` | Image crop-to-content + threshold-gated deskew |
+| `excel_report.py` | Renders the `.xlsx` report |
 | `config.py` | API keys (from `.env`), output paths |
 
 ## Notes

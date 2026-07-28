@@ -1,4 +1,4 @@
-from constants import STATUS_WORK, STATUS_WOFF, OFF_STATUSES
+from constants import STATUS_WORK, OFF_STATUSES
 
 
 class AttendanceValidator:
@@ -24,17 +24,15 @@ class AttendanceValidator:
             # Rule 3 : If times exist
             # but status missing
             # ----------------------------
+            # No else branch for "no time, no status": leave status
+            # blank even when a date is present. Only explicit
+            # leave/weekoff text (caught earlier by StatusDetector)
+            # should ever produce those statuses -- a row with a date
+            # but nothing else filled in yet is not evidence of a
+            # week off, just an unfilled row.
             elif status == "":
                 if in_time or out_time:
                     record["status"] = STATUS_WORK
-
-                # ----------------------------
-                # Rule 4 : No time, no status
-                # date exists → WOFF
-                # ----------------------------
-                else:
-                    if record.get("date", ""):
-                        record["status"] = STATUS_WOFF
 
             validated.append(record)
 
