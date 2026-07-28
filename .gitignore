@@ -9,7 +9,7 @@ venv/
 # Real attendance register samples (employee names, phone numbers,
 # handwriting) -- never commit to this public repo.
 inputs/
-samples/
+
 
 # VS Code
 .vscode/
