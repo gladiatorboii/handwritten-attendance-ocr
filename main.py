@@ -5,6 +5,10 @@ import sys
 from pathlib import Path
 from tkinter import Tk, filedialog
 
+#uvicorn api:app --host 0.0.0.0 --port 8000
+#http://127.0.0.1:8000/docs
+#http://192.168.68.108:8000/docs
+
 sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 PROJECT_ROOT = Path(__file__).resolve().parent

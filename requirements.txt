@@ -16,6 +16,14 @@ rapidfuzz==3.14.5
 # Date/time parsing (post_processing.normalize_time)
 python-dateutil==2.9.0.post0
 
+# Excel report output (excel_report.py)
+openpyxl==3.1.5
+
 # Mistral OCR API + Groq (Llama Vision recheck) + .env config
 requests==2.34.2
 python-dotenv==1.2.2
+
+# REST API (api.py) -- run with: uvicorn api:app --host 0.0.0.0 --port 8000
+fastapi==0.139.0
+uvicorn[standard]==0.51.0
+python-multipart==0.0.32

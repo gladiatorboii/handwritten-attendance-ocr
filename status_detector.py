@@ -3,6 +3,15 @@ from rapidfuzz import fuzz
 
 from constants import STATUS_WORK, STATUS_LEAVE, STATUS_WOFF
 
+# Mistral sometimes only transcribes the first syllable of a handwritten
+# "WEEKLY OFF"/"WEEK OFF" and drops the rest entirely (confirmed on a real
+# page where three separate weekoff rows all came back as a lone cell
+# reading just "WEE") -- too short a fragment for fuzzy_search's partial_ratio
+# to reliably clear the WOFF threshold against the full keyword list, so it
+# needs its own check: the *entire* cell (not a substring of a longer word)
+# must be "wee" plus trailing letters.
+_WOFF_FRAGMENT = re.compile(r"^wee[a-z]*$", re.IGNORECASE)
+
 
 class StatusDetector:
 
@@ -66,6 +75,12 @@ class StatusDetector:
             82
         ):
             return STATUS_WOFF
+
+        # ---------- WOFF (truncated fragment, whole cell only) ----------
+        for cell in row.get("cells", []):
+            token = re.sub(r"[^A-Za-z]", "", cell or "")
+            if token and _WOFF_FRAGMENT.match(token):
+                return STATUS_WOFF
 
         # ---------- WORK ----------
         if row.get("in_time") or row.get("out_time"):

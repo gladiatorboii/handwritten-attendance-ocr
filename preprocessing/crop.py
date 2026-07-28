@@ -1,3 +1,5 @@
+import shutil
+
 import cv2
 
 from config import debug_print
@@ -23,6 +25,28 @@ PADDING_FRACTION = 0.02
 # edges (shadows, desk grain, etc.).
 MIN_POLYGON_VERTICES = 4
 MAX_POLYGON_VERTICES = 6
+
+
+# The employee name/code heading always sits in this top slice of the
+# page, above the data table (confirmed across every sample this project
+# has seen) -- generous enough to never cut off a heading that sits
+# slightly lower, since a wider crop costs nothing but a little extra
+# image for the recheck model to look past.
+HEADER_REGION_FRACTION = 0.2
+
+
+def crop_header_region(input_path, output_path):
+    """
+    Crops the top slice of a page image containing the employee
+    name/code heading, so a header-recheck call (see
+    LlamaVisionEngine.recheck_header) can look at just that region
+    instead of the whole page.
+    """
+    image = cv2.imread(input_path)
+    height = image.shape[0]
+    cropped = image[: int(height * HEADER_REGION_FRACTION), :]
+    cv2.imwrite(output_path, cropped)
+    return output_path
 
 
 def crop_to_content(input_path, output_path):
@@ -75,15 +99,20 @@ def crop_to_content(input_path, output_path):
             break
 
     if candidate is None:
+        # A plain file copy, not cv2.imread/imwrite's decode-and-re-encode
+        # round-trip -- confirmed on a real page that the re-encode alone
+        # (even with nothing actually cropped) degraded the image just
+        # enough to make Mistral merge two adjacent table columns that
+        # OCR'd as separate on the untouched original.
         debug_print("crop_to_content: no quadrilateral page-shaped contour found, skipping crop")
-        cv2.imwrite(output_path, image)
+        shutil.copy(input_path, output_path)
         return output_path
 
     x, y, w, h = candidate
 
     if w >= image_w * (1 - MIN_REDUCTION_FRACTION) and h >= image_h * (1 - MIN_REDUCTION_FRACTION):
         debug_print("crop_to_content: detected boundary already fills the frame, skipping crop")
-        cv2.imwrite(output_path, image)
+        shutil.copy(input_path, output_path)
         return output_path
 
     pad_x = int(w * PADDING_FRACTION)

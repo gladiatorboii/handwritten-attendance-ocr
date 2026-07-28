@@ -5,11 +5,11 @@ import time
 import tempfile
 import shutil
 
-from html_report import generate_html_report
+from excel_report import generate_excel_report
 from config import get_output_paths
 
 
-def process_pdf(pipeline, pdf_path):
+def process_pdf(pipeline, pdf_path, progress_callback=None):
 
     total_start = time.perf_counter()
 
@@ -34,6 +34,12 @@ def process_pdf(pipeline, pdf_path):
             print("=" * 50)
             print(f"Processing Page {page_number + 1}/{total_pages}")
             print("=" * 50)
+
+            # Optional -- lets a caller (e.g. api.py's job tracker)
+            # observe progress without this function needing to know
+            # anything about how that caller reports it.
+            if progress_callback:
+                progress_callback(page_number + 1, total_pages)
 
             page = doc.load_page(page_number)
             pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
@@ -66,6 +72,7 @@ def process_pdf(pipeline, pdf_path):
                     employees.append({
                         "page": page_number + 1,
                         "employee_name": result.get("employee_name"),
+                        "employee_code": result.get("employee_code"),
                         "total_records": result.get("total_records", 0),
                         "records": result.get("records", []),
                         "timings": result.get("timings", {})
@@ -80,17 +87,14 @@ def process_pdf(pipeline, pdf_path):
         "employees": employees
     }
 
-    output_json, output_html = get_output_paths(pdf_path)
+    output_json, output_excel = get_output_paths(pdf_path)
 
     os.makedirs(os.path.dirname(output_json), exist_ok=True)
 
     with open(output_json, "w", encoding="utf-8") as f:
         json.dump(final_result, f, indent=4)
 
-    html = generate_html_report(final_result)
-
-    with open(output_html, "w", encoding="utf-8") as f:
-        f.write(html)
+    generate_excel_report(final_result, output_excel)
 
     pipeline.print_timing_summary(employees, time.perf_counter() - total_start)
 

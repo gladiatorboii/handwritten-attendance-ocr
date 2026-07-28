@@ -34,8 +34,8 @@ class ValidationEngine:
     # Statuses that represent a day with no attendance times at all.
     OFF_STATUSES = OFF_STATUSES
 
-    # dd/mm/yy(yy) with '/' or '-' separators.
-    DATE_PATTERN = re.compile(r"^(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})$")
+    # yyyy/mm/dd -- matches post_processing.normalize_date's output shape.
+    DATE_PATTERN = re.compile(r"^(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})$")
 
     # Date-sequence check (see _flag_date_sequence_issues): how many days
     # a forward gap between two dated rows is allowed to span before it
@@ -95,6 +95,27 @@ class ValidationEngine:
     MISSING_PENALTY = 50
 
     # ------------------------------------------------------------------
+    # PER-ROW CONFIDENCE SCORE
+    #
+    # A single 0-100 number per record, for sorting/triaging whole rows
+    # rather than individual cells -- built the same way field_confidence
+    # is: start at 100, subtract for whichever row-wide issues actually
+    # fired. Deliberately excludes the six field-specific validation
+    # flags (in_time/out_time invalid, missing, or disagreement) since
+    # those already lower field_confidence, and this score folds those
+    # in separately by taking the lowest of the two field scores --
+    # penalizing them here too would count the same evidence twice.
+    # ------------------------------------------------------------------
+    ROW_CONFIDENCE_PENALTIES = {
+        "date_invalid": 50,
+        "chronology_invalid": 30,
+        "time_alignment_suspect": 20,
+        "status_time_mismatch": 20,
+        "date_sequence_invalid": 20,
+        "struck_through": 100,
+    }
+
+    # ------------------------------------------------------------------
     # SEVERITY MODEL (OCR validation only -- attendance_analytics is a
     # separate namespace and never appears here)
     #
@@ -148,7 +169,10 @@ class ValidationEngine:
         for record in validated:
             self._decide_highlights(record)
             self._compute_field_confidence(record)
-            self._compute_verification_view(record)
+            self._compute_row_confidence(record)
+
+        for record in validated:
+            self._compact_for_output(record)
 
         return validated
 
@@ -217,6 +241,16 @@ class ValidationEngine:
             "in_time_outlier": False,
             "out_time_outlier": False,
         }
+
+        # Their only purpose was feeding the copy above -- pipeline.py
+        # sets these on the record purely as a hand-off to this method,
+        # not as data meant for the final output. Once compacted,
+        # "in_time_ocr_disagreement" appearing in the validation list
+        # already carries this same signal, so keeping the top-level
+        # copy too would just be paying twice for one fact.
+        record.pop("in_time_ocr_disagreement", None)
+        record.pop("out_time_ocr_disagreement", None)
+
         return record
 
     # ------------------------------------------------------------------
@@ -479,14 +513,19 @@ class ValidationEngine:
             if not chrono_ambiguous:
                 hit_fields.add("in_time")
 
-        record["cell_highlight"] = {
-            field: field in hit_fields
-            for field in ("date", "in_time", "out_time", "status")
-        }
+        # A list of only the flagged cells, not a 4-key dict spelling out
+        # "false" for every cell that *isn't* flagged -- the vast
+        # majority of rows flag nothing at all, so the all-false shape
+        # was pure overhead. "row_highlight" (== has_issue) and
+        # "row_fully_invalid" (== every cell in this list) are dropped
+        # entirely as pure duplicates; a caller derives the latter with
+        # len(cell_highlight) == 4 if it needs it (see excel_report.py).
+        record["cell_highlight"] = [
+            field for field in ("date", "in_time", "out_time", "status")
+            if field in hit_fields
+        ]
 
-        record["has_issue"] = any(record["cell_highlight"].values())
-        record["row_highlight"] = record["has_issue"]
-        record["row_fully_invalid"] = all(record["cell_highlight"].values())
+        record["has_issue"] = bool(record["cell_highlight"])
 
     # ------------------------------------------------------------------
     # PER-CELL CONFIDENCE SCORE (see FIELD_CONFIDENCE_BASE etc. above)
@@ -494,7 +533,7 @@ class ValidationEngine:
     def _compute_field_confidence(self, record):
         status = record.get("status", "")
         validation = record.get("validation", {})
-        highlight = record.get("cell_highlight", {})
+        highlight = record.get("cell_highlight", [])
 
         confidence = {}
 
@@ -502,12 +541,9 @@ class ValidationEngine:
 
             if status in self.OFF_STATUSES:
                 # No time is *expected* on a Leave/WOFF row -- an empty
-                # field here is correct, not a defect.
-                confidence[field] = {
-                    "score": self.FIELD_CONFIDENCE_BASE,
-                    "needs_review": highlight.get(field, False),
-                    "reasons": ["status row -- no time expected"],
-                }
+                # field here is correct, not a defect. Routine case,
+                # nothing to report -- omitted below like any other
+                # default-confidence field.
                 continue
 
             score = self.FIELD_CONFIDENCE_BASE
@@ -534,37 +570,69 @@ class ValidationEngine:
                     score += self.AGREEMENT_BONUS
                     reasons.append("Mistral/Llama read agree")
 
+            # A perfect score with nothing but the routine "valid
+            # format" reason is the common case (most cells are never
+            # even rechecked) and carries no signal beyond what
+            # cell_highlight already says -- omitted to avoid paying
+            # bytes for "everything's fine" on the majority of cells.
+            # Anything else (a penalty, or a recheck that actually ran)
+            # is kept in full, since that's exactly what a reviewer
+            # triaging flagged cells needs to see.
+            if reasons == ["valid format"]:
+                continue
+
             confidence[field] = {
                 "score": max(0, min(100, score)),
-                "needs_review": highlight.get(field, False),
+                "needs_review": field in highlight,
                 "reasons": reasons,
             }
 
         record["field_confidence"] = confidence
 
     # ------------------------------------------------------------------
-    # RAW PER-READ VIEW (debugging/benchmarking view only -- does not
-    # influence cell_highlight or field_confidence in any way).
-    #
-    # The boolean *_ocr_disagreement flag says "the recheck disagreed",
-    # not "here's what each read actually said" -- this just regroups
-    # what's already on the record into one place per field. Distinguishing
-    # "not rechecked" (key absent -> None) from "rechecked, read nothing"
-    # ("") is deliberate -- collapsing them would hide that most cells
-    # never get a recheck at all (see recheck_utils.needs_recheck).
+    # PER-ROW CONFIDENCE SCORE (see ROW_CONFIDENCE_PENALTIES above)
     # ------------------------------------------------------------------
-    def _compute_verification_view(self, record):
-        verification = {}
+    def _compute_row_confidence(self, record):
+        validation = record["validation"]  # still a dict at this point
+        score = self.FIELD_CONFIDENCE_BASE
 
+        for issue, penalty in self.ROW_CONFIDENCE_PENALTIES.items():
+            if validation.get(issue):
+                score -= penalty
+
+        # Folds in in_time/out_time's own scores rather than re-deriving
+        # them -- a row is only as trustworthy as its least trustworthy
+        # cell. A field missing from field_confidence (the routine case,
+        # see _compute_field_confidence) is implicitly a perfect 100 and
+        # doesn't need to be looked up.
         for field in ("in_time", "out_time"):
-            recheck_key = f"{field}_llama_recheck"
+            field_confidence = record["field_confidence"].get(field)
+            if field_confidence is not None:
+                score = min(score, field_confidence["score"])
 
-            verification[field] = {
-                "mistral": record.get(field, ""),
-                "llama_recheck": record.get(recheck_key) if recheck_key in record else None,
-            }
+        record["row_confidence"] = max(0, min(100, score))
 
-        record["verification"] = verification
+    # ------------------------------------------------------------------
+    # FINAL COMPACTION -- validation/attendance_analytics are dicts with
+    # every possible key always present (mostly "false") throughout all
+    # the processing above, since the internal checks rely on dict
+    # semantics (.get(), direct key assignment). Only at the very end,
+    # once nothing else needs to read them as dicts, are they rewritten
+    # into lists of just the checks that actually fired -- confirmed on
+    # a real page that 86% of rows flag nothing at all, so the all-keys
+    # shape was spending bytes on "false" that carries no signal, not on
+    # real evidence. A genuinely flagged row keeps every fired check
+    # named here; nothing about which cells get highlighted changes.
+    #
+    # There used to be a "verification" field here too (a per-field
+    # {"mistral": ..., "llama_recheck": ...} view) -- removed as pure
+    # duplication, since it never held anything not already on the
+    # record directly (the field's own value, and *_llama_recheck when
+    # present).
+    # ------------------------------------------------------------------
+    def _compact_for_output(self, record):
+        record["validation"] = [k for k, v in record["validation"].items() if v]
+        record["attendance_analytics"] = [k for k, v in record["attendance_analytics"].items() if v]
 
     # ------------------------------------------------------------------
     # DATE PARSING
@@ -577,14 +645,10 @@ class ValidationEngine:
             return None
 
         day, month, year = match.groups()
-        day, month = int(day), int(month)
+        year, month, day = int(year), int(month), int(day)
 
         if not (1 <= day <= 31) or not (1 <= month <= 12):
             return None
-
-        if len(year) == 2:
-            year = "20" + year
-        year = int(year)
 
         try:
             return datetime(year, month, day)

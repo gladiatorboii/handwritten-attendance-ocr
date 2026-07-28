@@ -43,11 +43,11 @@ def get_output_paths(input_path):
     """
     Output filenames mirror whichever input file was actually processed
     (e.g. "inputs/Rahul_June.pdf" -> "outputs/Rahul_June.json" /
-    ".html") instead of a single fixed "result.json"/"report.html" that
+    ".xlsx") instead of a single fixed "result.json"/"report.xlsx" that
     every run would overwrite regardless of which file it came from.
     """
     stem = os.path.splitext(os.path.basename(input_path))[0]
     return (
         os.path.join(OUTPUT_DIR, f"{stem}.json"),
-        os.path.join(OUTPUT_DIR, f"{stem}.html"),
+        os.path.join(OUTPUT_DIR, f"{stem}.xlsx"),
     )

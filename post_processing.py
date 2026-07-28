@@ -5,7 +5,13 @@ from constants import STATUS_WORK, STATUS_LEAVE, STATUS_WOFF
 from config import debug_print
 
 def normalize_date(date_str):
-
+    """
+    Output is DD-MM-YYYY -- registers themselves are always written
+    DD/MM/YY(YY) (confirmed across every sample this project has seen),
+    so parsing still reads the source in that order; only the returned
+    string's separator and year width change (day/month order is kept
+    as-written).
+    """
     if not date_str:
         return ""
 
@@ -24,33 +30,36 @@ def normalize_date(date_str):
     parts = value.split("/")
 
     if len(parts) == 3:
+        day, month, year = parts
+    else:
+        # Handle OCR that drops the separators entirely, e.g. "01062026"
+        # or "010626"
+        digits = re.sub(r"\D", "", value)
 
-        day = parts[0].zfill(2)
-        month = parts[1].zfill(2)
+        if len(digits) == 8:
+            day, month, year = digits[:2], digits[2:4], digits[4:8]
+        elif len(digits) == 6:
+            day, month, year = digits[:2], digits[2:4], digits[4:6]
+        else:
+            return value
 
-        year = parts[2]
+    day = day.zfill(2)
+    month = month.zfill(2)
 
-        # Convert 2026 -> 26
-        if len(year) == 4:
-            year = year[-2:]
+    # Convert a 1- or 2-digit year to a full 4-digit one (26 -> 2026);
+    # a 4-digit year is left as-is. A 3-digit year is a stray extra
+    # digit Mistral occasionally inserts (confirmed on real OCR output:
+    # "03-06-026" for a handwritten "03-06-26") -- the last 2 characters
+    # are the real 2-digit year regardless of what came before them.
+    if len(year) == 1:
+        year = year.zfill(2)
+    elif len(year) == 3:
+        year = year[-2:]
 
-        # Convert 6 -> 06
-        if len(year) == 1:
-            year = year.zfill(2)
+    if len(year) == 2:
+        year = "20" + year
 
-        return f"{day}/{month}/{year}"
-
-    # Handle OCR like 01062026
-    digits = re.sub(r"\D", "", value)
-
-    if len(digits) == 8:
-        return f"{digits[:2]}/{digits[2:4]}/{digits[6:]}"
-
-    # Handle OCR like 010626
-    if len(digits) == 6:
-        return f"{digits[:2]}/{digits[2:4]}/{digits[4:]}"
-
-    return value
+    return f"{day}-{month}-{year}"
 
 
 def normalize_time(time_str):
@@ -123,9 +132,9 @@ def normalize_status(status):
     status = str(status).strip().upper()
 
     mapping = {
-        STATUS_WORK: STATUS_WORK,
-        STATUS_LEAVE: STATUS_LEAVE,
-        STATUS_WOFF: STATUS_WOFF,
+        STATUS_WORK.upper(): STATUS_WORK,
+        STATUS_LEAVE.upper(): STATUS_LEAVE,
+        STATUS_WOFF.upper(): STATUS_WOFF,
         "W/OFF": STATUS_WOFF,
         "WEEK OFF": STATUS_WOFF,
         "WEEKOFF": STATUS_WOFF,

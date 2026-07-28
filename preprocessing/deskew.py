@@ -1,7 +1,19 @@
+import shutil
+
 import cv2
 import numpy as np
 
 from config import debug_print
+
+# Below this angle, a rotation does more harm than good -- confirmed on
+# a real page where the detected skew was only 0.91 degrees (essentially
+# noise from slightly uneven table lines, not real photographic tilt),
+# yet applying that rotation still introduced enough interpolation
+# blur to make Mistral split a date across a phantom extra column. A
+# genuinely tilted photo (5-15+ degrees from an unsteady hand) is well
+# above this threshold and still gets corrected; a page that's already
+# essentially straight no longer gets a risky rotation it doesn't need.
+MIN_CORRECTION_DEGREES = 3.0
 
 
 def deskew_image(input_path, output_path):
@@ -52,16 +64,18 @@ def deskew_image(input_path, output_path):
             if abs(angle) < 20:
                 angles.append(angle)
 
-    if len(angles) == 0:
+    skew_angle = np.median(angles) if angles else 0.0
 
-        cv2.imwrite(
-            output_path,
-            image
-        )
+    if len(angles) == 0 or abs(skew_angle) < MIN_CORRECTION_DEGREES:
+
+        # A plain file copy, not cv2.imread/imwrite's decode-and-re-encode
+        # round-trip -- confirmed on a real page (see preprocessing/crop.py's
+        # same fix) that the re-encode alone, even with nothing actually
+        # transformed, can degrade the image just enough to make Mistral
+        # misread tightly-spaced table columns.
+        shutil.copy(input_path, output_path)
 
         return output_path
-
-    skew_angle = np.median(angles)
 
     h, w = image.shape[:2]
 
