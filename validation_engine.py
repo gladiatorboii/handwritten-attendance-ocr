@@ -88,7 +88,7 @@ class ValidationEngine:
     # cell_highlight; the score is explanatory, not a second decision-maker.
     # ------------------------------------------------------------------
     FIELD_CONFIDENCE_BASE = 100
-    AGREEMENT_BONUS = 40       # Surya and EasyOCR independently agree
+    AGREEMENT_BONUS = 40       # Mistral and the vision recheck model independently agree
     VALID_FORMAT_BONUS = 20
     OCR_DISAGREEMENT_PENALTY = 40
     INVALID_FORMAT_PENALTY = 30
@@ -123,8 +123,9 @@ class ValidationEngine:
     # impossible chronology, a mandatory time missing, etc. These are
     # certainties, not judgment calls.
     #
-    # STRONG: Llama's independent recheck (see llama_vision_engine.py)
-    # disagreeing with Mistral's first read of the same cell. This is NOT
+    # STRONG: the independent vision recheck model (see
+    # vision_recheck_engine.py) disagreeing with Mistral's first read of
+    # the same cell. This is NOT
     # a claim the first read was wrong -- re-reading a small/ambiguous
     # region can go either way. It highlights anyway, because the bar
     # for "worth a human glance" is lower than the bar for "provably
@@ -143,13 +144,12 @@ class ValidationEngine:
         "time_alignment_suspect": ["in_time", "status"],
         "status_time_mismatch": ["status"],
         "date_sequence_invalid": ["date"],
-        # A row Mistral's own transcription marked as struck through (see
-        # MistralOCREngine._STRIKETHROUGH) looks like it was voided/
+        # A row the model itself reported as struck_through (see
+        # MistralOCREngine._EXTRACTION_SCHEMA) looks like it was voided/
         # corrected by the person who wrote it -- worth a human glance on
-        # the whole row, not just one field. Only catches the cases
-        # Mistral itself rendered with strikethrough markup; a crossed-out
-        # row transcribed as plain text won't trigger this (see
-        # _STRIKETHROUGH's docstring for why this isn't a complete signal).
+        # the whole row, not just one field. Only catches what the model
+        # itself flagged; a crossed-out row it doesn't notice as such
+        # won't trigger this.
         "struck_through": ["date", "in_time", "out_time", "status"],
     }
 
@@ -563,12 +563,12 @@ class ValidationEngine:
                 if validation.get(f"{field}_ocr_disagreement"):
                     score -= self.OCR_DISAGREEMENT_PENALTY
                     reasons.append("recheck disagreement")
-                elif record.get(f"{field}_llama_recheck"):
+                elif record.get(f"{field}_recheck_value"):
                     # This cell was actually rechecked (not every cell is
                     # -- see recheck_utils.needs_recheck) and Mistral's
-                    # original read agreed with Llama's independent recheck.
+                    # original read agreed with the independent recheck.
                     score += self.AGREEMENT_BONUS
-                    reasons.append("Mistral/Llama read agree")
+                    reasons.append("Mistral/recheck read agree")
 
             # A perfect score with nothing but the routine "valid
             # format" reason is the common case (most cells are never
@@ -625,9 +625,9 @@ class ValidationEngine:
     # named here; nothing about which cells get highlighted changes.
     #
     # There used to be a "verification" field here too (a per-field
-    # {"mistral": ..., "llama_recheck": ...} view) -- removed as pure
+    # {"mistral": ..., "recheck": ...} view) -- removed as pure
     # duplication, since it never held anything not already on the
-    # record directly (the field's own value, and *_llama_recheck when
+    # record directly (the field's own value, and *_recheck_value when
     # present).
     # ------------------------------------------------------------------
     def _compact_for_output(self, record):

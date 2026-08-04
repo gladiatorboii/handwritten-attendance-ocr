@@ -55,36 +55,39 @@ input file (image or PDF)
       |       threshold or if no lines are found.
       |
       |-- 3. MistralOCREngine.run()   (mistral_ocr_engine.py)
-      |       The deskewed image goes to Mistral's OCR endpoint.
-      |       If it comes back empty, retries once with the
-      |       ORIGINAL untouched image -- confirmed empirically
-      |       that preprocessing can occasionally make an otherwise
-      |       legible page unreadable to Mistral even though it
-      |       looks fine to the eye.
-      |       Returns one or more "blocks" (see 3. below), each
-      |       {"records": [...], "signature_name": "..."}.
+      |       The deskewed image goes to Mistral's OCR endpoint,
+      |       requesting structured JSON directly (document_
+      |       annotation_format) rather than a markdown table this
+      |       class would otherwise have to parse itself -- see 3.
+      |       below for why. If it comes back empty, retries once
+      |       with the ORIGINAL untouched image -- confirmed
+      |       empirically that preprocessing can occasionally make
+      |       an otherwise legible page unreadable to Mistral even
+      |       though it looks fine to the eye.
+      |       Returns one or more "blocks" (almost always one; more
+      |       than one when a page holds multiple employees), each
+      |       {"records": [...], "signature_name": "...",
+      |       "employee_code": "..."} -- name/code already resolved
+      |       per employee directly by the model, no separate
+      |       heading-scan step needed.
       |
-      |-- 4. Name resolution
-      |       Page-level name (from text above the table) vs each
-      |       block's own repeated "Sign" column text -- see 3.4.
-      |
-      |-- 5. process_records()   (post_processing.py)
+      |-- 4. process_records()   (post_processing.py)
       |       Normalizes each record's date/time/status strings into
       |       a consistent shape. Does NOT alter values otherwise --
       |       whatever Mistral read is what ends up in the output.
       |
-      |-- 6. AttendanceValidator.validate()   (validators.py)
+      |-- 5. AttendanceValidator.validate()   (validators.py)
       |       Small rule-based cleanup: blanks times on LEAVE/WOFF
       |       rows, infers WORK/WOFF status when it's missing.
       |
-      |-- 7. Row recheck   (llama_vision_engine.py + recheck_utils.py)
+      |-- 6. Row recheck   (vision_recheck_engine.py + recheck_utils.py)
       |       For rows recheck_utils.needs_recheck() flags (invalid
       |       format, or a statistical outlier -- see 4. below),
-      |       Llama 4 Scout independently re-reads the SAME page
-      |       image and reports what it sees for that one row.
+      |       Qwen 3.6 27B (via Groq) independently re-reads the SAME
+      |       page image and reports what it sees for those rows.
       |       Disagreement is recorded, not "corrected".
       |
-      |-- 8. ValidationEngine.validate_records()   (validation_engine.py)
+      |-- 7. ValidationEngine.validate_records()   (validation_engine.py)
       |       Full flagging + confidence scoring pass -- see 5. below.
       |
       v
@@ -97,56 +100,35 @@ input file (image or PDF)
 
 ## 3. Extraction engine (`mistral_ocr_engine.py`)
 
-Mistral's OCR returns markdown, not structured JSON — this module owns turning that markdown into records. This is the most heavily-evolved part of the codebase, because real handwritten registers vary wildly in column count, wording, and OCR rendering quirks.
+**Rewritten 2026-08-03** to request structured JSON directly from Mistral (`document_annotation_format`, an explicit JSON Schema — see `_EXTRACTION_SCHEMA`) instead of a markdown table transcription this module then had to parse itself. The markdown-parsing approach (column-role keyword matching, multi-block column-range splitting, header-value-shape inference, pipe-split-date repair, HTML/caption-JSON unwrapping, and a whole separate heading-text scanner for employee name/code) is gone — the model now returns each employee's name, code, and full list of daily records directly, matching a schema this module defines, guided by an explicit prompt (`_EXTRACTION_PROMPT`) describing the shapes a page can take (one employee; two sharing one wide table side by side; two sequential tables).
 
-### 3.1 Column-role classification, not fixed positions
+**Why the rewrite:** confirmed on a real page with two employees sharing one wide table (whose header was missing a serial-number cell for the second employee, shifting every later column label one position off from the data underneath it) that the old markdown parser lost the second employee's Out Time column entirely and got the first employee's In/Out direction backwards, with no way to tell from column shape alone which of two equally time-shaped columns was "in" vs "out". The header-text-driven approach had no way to recover from a header that mislabels its own columns. Asking the model for structured fields directly — with an explicit prompt describing the dual-table layout — got every row right on that same page, including direction, in direct side-by-side testing against the old approach.
 
-Every header cell is matched against keyword patterns (`_ROLE_PATTERNS`) for `date`, `in_time`, `out_time`, `remark` — never by column index or exact wording. This is deliberate: two registers with different column counts, orders, or labels ("In time" vs "IN" vs fused "Intime") both work without any per-format special-casing.
+**What this simplifies downstream:** `pipeline.py` no longer needs a separate page-level "base name" vs. per-block "signature name" reconciliation step (`_names_look_different`, the `"(table N)"` fallback label) — each block already carries its own `employee_name`/`employee_code` directly from the schema, since the model was asked to read each from that specific employee's own heading/signature text, not a page-wide title that might belong to the other employee.
 
-When a header's own text is garbled or a header isn't legible at all, `_infer_missing_roles` falls back to guessing a role from the *shape* of a column's own data (does it look like `DD/MM/YY`? Does it look like `HH:MM`?) rather than trusting header text unconditionally. A majority of a column's non-blank values matching (`MIN_INFERENCE_MATCH_FRACTION = 0.7`), not every single one, is enough — real handwriting has enough noise that requiring a unanimous match would break on the first garbled cell.
+### 3.1 What still runs after extraction
 
-### 3.2 Multi-block pages
+The schema only returns raw field values — the same post-extraction logic as before still applies to whatever comes back:
+- **Status detection** (`status_detector.py`) — unchanged, still fuzzy-matches LEAVE/WOFF keywords (and truncated fragments like "WEE" or "WO") against each record's own text, checked only when no real time value is present (a row with real times is never overridden to Weekoff/Leave by stray text elsewhere).
+- **Shift-code remark filtering** (`_SHIFT_CODE_REMARK`) — a remark is kept only if it's single-letter shift codes joined by `+` (e.g. `"A+B"`); anything else (`"M+Bag"`, free text) is dropped.
+- **Time-value noise filtering** (`_is_noise_value`) — an in_time/out_time field that isn't actually a time (a WOFF/leave marker, or leftover letters once digits/separators are stripped) is blanked rather than kept as a bogus value.
+- **Name/code light cleanup** (`_clean_employee_name`/`_clean_employee_code`) — a much smaller safety net than the old heading-scanner needed, since the model is now told exactly where to look rather than guessing among ambiguous candidates; still strips stray digit runs, `(Sub)`/trade-code tags from names, and validates a code is a bare 5-7 digit number before trusting it.
+- **Padding-row / corrupted-response guard** — a fully-blank record (no date, times, or remark at all) past the real data is dropped silently; a block with implausibly many records (`MAX_PLAUSIBLE_RECORDS_PER_BLOCK = 40`) is treated as a corrupted response entirely, same as before.
+- **Retry on transient failures** — `_call_ocr` still retries up to `OCR_MAX_ATTEMPTS = 3` times with backoff on rate limits (429) and server errors (5xx).
 
-A page can hold more than one full attendance table in two different shapes:
-- **Side by side** in one wide table (`_find_group_ranges` — splits the header's columns into repeating groups, recognizable because "Date" appears more than once).
-- **Sequentially**, one full table after another (`_find_headers` collects *every* header-shaped row, not just the first).
+### 3.2 Struck-through rows
 
-Each block is processed independently and becomes its own entry in the output.
+No longer detected via markdown strikethrough syntax (`~~text~~` can't survive being represented as a plain JSON string field) — the schema instead asks the model to report `struck_through` directly as a boolean per record, based on what it visually observes in the handwriting itself (a voided/crossed-out row), not a person's own signature stroke style.
 
-### 3.3 Rejecting phantom blocks
-
-A group that has a `date` column but never a single `in_time` or `out_time` column anywhere in its data is dropped entirely, rather than emitted as a fake employee with every time blank. This specifically catches a facing register page's edge bleeding into a photo's frame (its SNo/Date columns visible, but the shot cropped before that page's own In/Out columns) — a real attendance table always has at least one time column, so a group with none isn't one.
-
-### 3.4 Employee name resolution
-
-`extract_employee_name` looks for a markdown heading above the table first, then a plausible plain text line, then (last resort) name-like text merged into the first table row. Since the page-level name only ever identifies *one* employee, each block additionally checks its own repeated "Sign" column text (`_extract_block_signature_name`) — used instead of the page-level name only when it looks genuinely different (`pipeline._names_look_different`), which is how two different employees sharing one photographed page each get correctly labeled.
-
-### 3.5 Handling Mistral response quirks
-
-All confirmed against real captured responses, not hypothetical:
-
-- **Bounding-box/caption JSON wrapper** — Mistral sometimes wraps the transcription in `[{"box_2d": ..., "caption": "...markdown..."}]` instead of returning plain markdown. `_unwrap_caption_json` extracts the caption text via regex (not `json.loads`) because the wrapper isn't always valid JSON to begin with.
-- **HTML tables mixed with markdown** — Mistral occasionally renders one table on a page as markdown and a *different* table on the same page as raw `<tr><td>` HTML, sometimes glued directly onto the end of the previous markdown row with no newline at all. `_convert_html_tables` finds and rewrites any embedded HTML table into markdown in place, before the rest of parsing ever runs.
-- **Repetition-loop decoding failure** — the decoder can get stuck endlessly repeating a fragment (e.g. an HTML tag) after correctly transcribing the real rows. `MAX_PLAUSIBLE_RECORDS_PER_BLOCK = 40` catches an implausibly large block (no real month has more rows than that) and discards the whole response, triggering the same fallback-to-original-image retry as a failed call.
-- **Transient API failures** — `_call_ocr` retries up to `OCR_MAX_ATTEMPTS = 3` times with backoff on rate limits (429) and server errors (5xx), not on genuine bad requests. Confirmed empirically: pages that failed mid-batch-run succeeded instantly when retried individually right after.
-- **Pipe-split dates** — a date like `01/05/26` occasionally comes back with its own separator rendered as a literal `|`, which collides with markdown's own cell delimiter and shreds it into 2-3 fragments (`_repair_pipe_split_date` merges them back).
-- **Date+time merged in one cell** — some registers have the date and in-time written in the same physical box with no ruled line between them; Mistral transcribes it as one cell (`"01/05/26 14:00"`). `_infer_missing_roles` recognizes this shape and leaves `in_time` unassigned to a column, so `_rows_to_records` can split it back out of the date cell directly instead of forcing some unrelated column into the role.
-- **Handwritten colon rendered as apostrophe** — `"6'.50"` for `6:50`. Tolerated as an optional extra character in the time regexes, and stripped outright in `post_processing.normalize_time`.
-- **Fused header words** — `"Intime"`/`"Outtime"` with no space, which a plain `\bin\b`/`\bout\b` word-boundary match can't see. Explicit fused-word alternatives are in `_ROLE_PATTERNS`.
-
-### 3.6 Struck-through rows
-
-`_STRIKETHROUGH` detects markdown `~~text~~` — a partial signal only (Mistral doesn't always render a visibly crossed-out row this way). Checked only against a row's own core data (`date`, `in_time`, `out_time`), not every cell in its column range — a signature column's handwriting can have its own decorative stroke that isn't a cancellation mark, and checking the whole row would flag every row on a page where that happens.
-
-## 4. Row recheck (`llama_vision_engine.py`, `recheck_utils.py`)
+## 4. Row recheck (`vision_recheck_engine.py`, `recheck_utils.py`)
 
 Not every cell gets rechecked — `recheck_utils.needs_recheck` gates it to only:
 - a value that doesn't even look like a valid time format, or
 - a statistical outlier (MAD-based, against the rest of that page's WORK rows' in/out times and shift durations) — `find_outlier_records`.
 
-For a flagged row, `LlamaVisionEngine.recheck_row` sends the *same full page image* again (not a cropped cell — there's no per-cell bounding-box geometry available once Mistral's OCR API is the only engine) with a prompt naming the specific date, plus a disambiguator (block position and/or "the Nth row with this date") when that date repeats on the page.
+Every flagged row on a page is batched into a *single* call to `VisionRecheckEngine.recheck_rows`, sending the same full page image (not a cropped cell — there's no per-cell bounding-box geometry available) alongside a list of every row that needs a second look, each with a date and a disambiguator (block position and/or "the Nth row with this date") when that date repeats on the page. Batching matters here specifically: the underlying model (Qwen 3.6 27B via Groq) has a small per-minute token quota on this account, and the page image itself (re-uploaded on every call) dominates that cost — one call per row per field burned through the whole budget after 1-2 calls on a real page; one call per page does not. A 429 is retried once after waiting out the window Groq itself reports.
 
-`disagrees()` compares the two reads on full `HH:MM`. A disagreement doesn't overwrite Mistral's value — it's recorded as `{field}_llama_recheck` and `{field}_ocr_disagreement`, which feeds into the flagging system below.
+`disagrees()` compares the two reads on full `HH:MM`. A disagreement doesn't overwrite Mistral's value — it's recorded as `{field}_recheck_value` and `{field}_ocr_disagreement`, which feeds into the flagging system below.
 
 ## 5. Validation & flagging (`validation_engine.py`)
 

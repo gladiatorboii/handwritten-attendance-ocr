@@ -38,9 +38,9 @@ HEADER_REGION_FRACTION = 0.2
 def crop_header_region(input_path, output_path):
     """
     Crops the top slice of a page image containing the employee
-    name/code heading, so a header-recheck call (see
-    LlamaVisionEngine.recheck_header) can look at just that region
-    instead of the whole page.
+    name/code heading, so pipeline.py's header-recheck fallback (a
+    second MistralOCREngine.run() call when the first pass finds no
+    name/code) can look at just that region instead of the whole page.
     """
     image = cv2.imread(input_path)
     height = image.shape[0]

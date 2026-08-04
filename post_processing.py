@@ -78,7 +78,18 @@ def normalize_time(time_str):
         # Normalize A.M / P.M before dot replacement
         cleaned = cleaned.replace("A.M", "AM").replace("P.M", "PM")
         cleaned = cleaned.replace("a.m", "AM").replace("p.m", "PM")
-        cleaned = cleaned.replace(".", ":").replace(",", ":").replace(";", ":").replace(" ", "")
+        # "-" as the HH/MM separator (e.g. "22-08" for "22:08") -- confirmed
+        # on a real page that used this throughout instead of ":"; safe to
+        # fold in with the other separator substitutions since this
+        # function only ever sees an in_time/out_time value, never a date.
+        cleaned = cleaned.replace(".", ":").replace(",", ":").replace(";", ":").replace("-", ":").replace(" ", "")
+        # A trailing separator with nothing after it (e.g. "13:55." ->
+        # "13:55:" once "." becomes ":") isn't a second field, just a
+        # stray mark following the real value -- confirmed on a real page
+        # where this made dateutil.parse reject an otherwise-valid time
+        # outright, silently falling through to returning the raw
+        # unnormalized string instead.
+        cleaned = cleaned.rstrip(":")
         # Fix A:M / P:M after dot replacement
         cleaned = cleaned.replace("A:M", "AM").replace("P:M", "PM")
         cleaned = re.sub(r'(\d)(AM|PM)', r'\1 \2', cleaned)

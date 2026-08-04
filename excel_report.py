@@ -53,8 +53,11 @@ def generate_excel_report(data, output_path):
     row = 2
 
     if "employees" in data:
-        for employee_data in data.get("employees", []):
+        employees = data.get("employees", [])
+        for i, employee_data in enumerate(employees):
             row = _write_employee_rows(ws, row, employee_data)
+            if i < len(employees) - 1:
+                row += 1  # blank row between employees, for readability
     else:
         row = _write_employee_rows(ws, row, data)
 

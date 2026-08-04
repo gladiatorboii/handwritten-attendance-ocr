@@ -4,8 +4,8 @@ Extracts daily in/out attendance records (date, in-time, out-time, status, remar
 
 ## How it works
 
-- **Mistral Document AI OCR** reads each page and transcribes it to a markdown table, which is parsed into structured records (date/in_time/out_time/status/remark) by keyword-matching column headers, not fixed column positions — so registers with different column counts, orders, or wording all work.
-- **Llama 4 Scout** (via Groq) independently re-reads any row flagged as suspicious (an invalid time format, or a statistical outlier against the rest of the page) as a second opinion, since Mistral re-checking its own read can't catch a misread it makes confidently both times.
+- **Mistral Document AI OCR** reads each page and returns structured records (date/in_time/out_time/status/remark, plus employee name/code) directly via a JSON Schema request — no fixed column positions or wording assumed, so registers with different column counts, orders, or layouts (including two employees sharing one page) all work.
+- **Qwen 3.6 27B** (via Groq) independently re-reads any row flagged as suspicious (an invalid time format, or a statistical outlier against the rest of the page) as a second opinion, since Mistral re-checking its own read can't catch a misread it makes confidently both times.
 - A validation layer flags cells for human review (invalid dates/times, impossible chronology, OCR disagreement between the two engines, struck-through rows, etc.) and produces a confidence score per field.
 - Double-page photo spreads (two physical register pages in one shot) are auto-detected and split before OCR ever sees them.
 
@@ -64,8 +64,8 @@ Each request saves its upload under a unique temp name, so concurrent requests �
 | `api.py` | Server entry point — REST API wrapping the same pipeline (see "Running as a server" above) |
 | `pipeline.py` | Per-page orchestration: crop → deskew → OCR → recheck → validate |
 | `pdf_processor.py` | Multi-page PDF driver, calls into `pipeline.py` per page |
-| `mistral_ocr_engine.py` | Mistral OCR call + markdown table parsing into records |
-| `llama_vision_engine.py` | Llama 4 Scout (Groq) second-opinion recheck on flagged rows |
+| `mistral_ocr_engine.py` | Mistral OCR call, structured extraction into records |
+| `vision_recheck_engine.py` | Qwen 3.6 27B (Groq) second-opinion recheck on flagged rows |
 | `recheck_utils.py` | Engine-agnostic outlier detection / "does this row need a recheck" logic |
 | `validation_engine.py` | Per-cell/per-row flagging and confidence scoring |
 | `post_processing.py` | Date/time/status string normalization |

@@ -77,7 +77,7 @@ def health():
 
 
 # ------------------------------------------------------------------
-# JOB STORE -- a PDF can take 100-200+ seconds (Mistral OCR + Llama
+# JOB STORE -- a PDF can take 100-200+ seconds (Mistral OCR + vision
 # recheck per page). Holding an HTTP connection open that long is bad
 # practice (proxies/browsers can time it out, and the caller has no
 # visibility into progress) -- so POST /extract submits and returns

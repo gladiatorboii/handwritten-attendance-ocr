@@ -8,19 +8,21 @@ from PIL import Image, ImageOps
 
 from preprocessing.deskew import deskew_image
 from preprocessing.crop import crop_to_content, crop_header_region
+from preprocessing.rotation import needs_rotation, rotate_image
 from validation_engine import ValidationEngine
 from post_processing import process_records
 from excel_report import generate_excel_report
 from validators import AttendanceValidator
 from mistral_ocr_engine import MistralOCREngine
-from llama_vision_engine import LlamaVisionEngine
+from vision_recheck_engine import VisionRecheckEngine
 from recheck_utils import find_outlier_records, needs_recheck, disagrees
 from constants import STATUS_WORK
 from config import (
     PREPROCESSED_DIR,
     get_output_paths,
     MISTRAL_API_KEY,
-    GROQ_API_KEY
+    GROQ_API_KEY,
+    debug_print
 )
 
 
@@ -44,14 +46,14 @@ class AttendancePipeline:
         if not GROQ_API_KEY:
             raise ValueError(
                 "GROQ_API_KEY is not set (see .env / .env.example) -- "
-                "Llama 4 Scout (via Groq) is the row-recheck engine this "
+                "Qwen 3.6 27B (via Groq) is the row-recheck engine this "
                 "pipeline uses to independently verify flagged rows."
             )
 
         self.validator = AttendanceValidator()
         self.validation_engine = ValidationEngine()
         self.mistral_ocr_engine = MistralOCREngine(api_key=MISTRAL_API_KEY)
-        self.llama_vision_engine = LlamaVisionEngine(api_key=GROQ_API_KEY)
+        self.vision_recheck_engine = VisionRecheckEngine(api_key=GROQ_API_KEY)
 
     def _load_input(self, input_path):
 
@@ -60,7 +62,8 @@ class AttendancePipeline:
         # Image
         if extension != ".pdf":
             temp_dir = tempfile.mkdtemp(prefix="attendance_pages_")
-            pages = self.split_double_page(input_path, temp_dir)
+            image_path = self._correct_rotation(input_path, temp_dir)
+            pages = self.split_double_page(image_path, temp_dir)
             if len(pages) == 1 and pages[0] == input_path:
                 self._cleanup(temp_dir)  # nothing was split/written, nothing to clean up
                 return [input_path], None
@@ -91,11 +94,64 @@ class AttendancePipeline:
 
             pix.save(image_path)
 
+            image_path = self._correct_rotation(image_path, temp_dir)
+
             pages.extend(self.split_double_page(image_path, temp_dir))
 
         doc.close()
 
         return pages, temp_dir
+
+    def _correct_rotation(self, image_path, temp_dir):
+        """
+        Some scans have their content genuinely rotated 90 degrees from
+        their own pixel dimensions -- confirmed on a real PDF where every
+        page's embedded photo held a landscape two-page spread but was
+        saved with portrait pixel dimensions, no EXIF orientation tag,
+        and no PDF page /Rotate flag anywhere signaling this (so neither
+        this method's own EXIF handling elsewhere, nor split_double_page's
+        aspect-ratio check, ever had a signal to act on -- the image just
+        silently stayed sideways, and Mistral could read some of it but
+        unreliably lost a whole second employee's table on several pages
+        that shape affected).
+
+        needs_rotation() (Hough-line orientation analysis, see
+        preprocessing/rotation.py) only detects THAT a 90-degree
+        correction is likely needed, not which of the two directions is
+        right -- getting that wrong would just trade one broken
+        orientation for another (upside down instead of sideways). Both
+        candidates get a real, cheap verification: crop just the header-
+        sized top strip of each and run one OCR call on it, keeping
+        whichever direction actually finds a name. Falls back to the
+        original, uncorrected image if neither does (better to leave a
+        page as it was than confidently apply a coin-flip rotation).
+        """
+        if not needs_rotation(image_path):
+            return image_path
+
+        base = os.path.splitext(os.path.basename(image_path))[0]
+        best_path = image_path
+
+        for degrees in (90, -90):
+            candidate_path = os.path.join(temp_dir, f"{base}_rot{degrees}.jpg")
+            rotate_image(image_path, degrees, candidate_path)
+
+            probe_path = os.path.join(temp_dir, f"{base}_rot{degrees}_probe.jpg")
+            crop_header_region(candidate_path, probe_path)
+            probe_blocks = self.mistral_ocr_engine.run(probe_path)
+
+            if any(b.get("signature_name") for b in probe_blocks):
+                debug_print(
+                    f"AttendancePipeline: rotated {degrees} degrees "
+                    f"(confirmed via header probe)"
+                )
+                return candidate_path
+
+        debug_print(
+            "AttendancePipeline: image looked rotated but neither "
+            "direction's header probe found a name -- leaving unrotated"
+        )
+        return best_path
 
     def split_double_page(self, image_path, temp_dir):
         """
@@ -184,8 +240,8 @@ class AttendancePipeline:
                     progress_callback(index, len(pages))
 
                 # A physical page is almost always one set of records, but
-                # occasionally two full tables share one page (see
-                # MistralOCREngine._find_group_ranges) -- _process_page
+                # occasionally two employees share one page (see
+                # MistralOCREngine._EXTRACTION_SCHEMA) -- _process_page
                 # returns a list either way so neither case is special-cased
                 # here.
                 page_results = self.process_page(page_path)
@@ -235,10 +291,11 @@ class AttendancePipeline:
         # -----------------------------
         # Mistral OCR (main, and only, extraction engine)
         #
-        # Almost always one block; occasionally two full tables share one
-        # physical page (see MistralOCREngine._find_group_ranges), in
-        # which case each is processed through the rest of the pipeline
-        # independently and returned as its own result.
+        # Almost always one block; occasionally two employees share one
+        # physical page, in which case each block already carries its own
+        # name/code/records (see MistralOCREngine._EXTRACTION_SCHEMA) and
+        # is processed through the rest of the pipeline independently,
+        # returned as its own result.
         # -----------------------------
         ocr_start = time.perf_counter()
 
@@ -254,69 +311,40 @@ class AttendancePipeline:
             # extra call only on the rare page that comes back empty.
             blocks = self.mistral_ocr_engine.run(image_path)
 
-        base_name = self.mistral_ocr_engine.extract_employee_name(
-            self.mistral_ocr_engine.last_markdown
-        )
-        employee_code = self.mistral_ocr_engine.extract_employee_code(
-            self.mistral_ocr_engine.last_markdown
-        )
-
-        # Mistral's markdown transcription sometimes garbles the heading
-        # badly enough that neither field-extraction pass above finds
-        # anything at all -- re-OCR'ing just the header crop (rather than
-        # the whole page) gives Mistral a second, more focused look at
-        # exactly that region, which costs one extra call only on the
-        # pages that actually need it. Reuses the same extraction logic
-        # already proven on the full page, just against a smaller image.
-        if not base_name or not employee_code:
+        # A block missing its own name/code (the heading was too garbled
+        # for the model to read alongside the full page) gets a second,
+        # more focused look at just the header crop -- costs one extra
+        # call only on the pages that actually need it. Matched back to
+        # the block needing it by position; if the header crop returns
+        # fewer entries than there are blocks (e.g. one employee's
+        # heading was legible enough to already succeed), the first
+        # header-crop entry is reused as the best available guess.
+        if any(not b.get("signature_name") or not b.get("employee_code") for b in blocks):
             header_path = os.path.join(
                 PREPROCESSED_DIR,
                 f"header_{os.path.basename(image_path)}"
             )
             crop_header_region(deskewed_path, header_path)
-            self.mistral_ocr_engine.run(header_path)
+            header_blocks = self.mistral_ocr_engine.run(header_path)
 
-            if not base_name:
-                base_name = self.mistral_ocr_engine.extract_employee_name(
-                    self.mistral_ocr_engine.last_markdown
-                )
-            if not employee_code:
-                employee_code = self.mistral_ocr_engine.extract_employee_code(
-                    self.mistral_ocr_engine.last_markdown
-                )
+            if header_blocks:
+                for i, b in enumerate(blocks):
+                    if b.get("signature_name") and b.get("employee_code"):
+                        continue
+                    hb = header_blocks[i] if i < len(header_blocks) else header_blocks[0]
+                    if not b.get("signature_name"):
+                        b["signature_name"] = hb.get("signature_name", "")
+                    if not b.get("employee_code"):
+                        b["employee_code"] = hb.get("employee_code", "")
 
         ocr_time = time.perf_counter() - ocr_start
 
         results = []
         for block_index, block in enumerate(blocks):
             records = block.get("records", [])
-            signature_name = block.get("signature_name", "")
-
-            employee_name = base_name
-            block_hint = None
-            if len(blocks) > 1:
-                block_hint = self._block_hint(block_index, len(blocks))
-                if self._names_look_different(base_name, signature_name):
-                    # This block's own repeated signature is a genuinely
-                    # different identity from the page-level name (see
-                    # MistralOCREngine._extract_block_signature_name) --
-                    # two different employees shared this page, so using
-                    # the page-level name for both would silently
-                    # mislabel one employee's records under the other's
-                    # name.
-                    employee_name = signature_name
-                else:
-                    label = f"table {block_index + 1}"
-                    employee_name = f"{base_name} ({label})" if base_name else f"({label})"
-
-            # Falls back to this block's own repeated signature (already
-            # computed, no extra cost) when nothing above found a name at
-            # all -- confirmed on a real page: the heading had no
-            # separate name text of its own, but the sig column
-            # consistently repeated the employee's name throughout the
-            # table itself.
-            if not employee_name and signature_name:
-                employee_name = signature_name
+            employee_name = block.get("signature_name", "")
+            employee_code = block.get("employee_code", "")
+            block_hint = self._block_hint(block_index, len(blocks)) if len(blocks) > 1 else None
 
             results.append(self._process_block(
                 deskewed_path,
@@ -330,13 +358,6 @@ class AttendancePipeline:
             ))
 
         return results
-
-    def _names_look_different(self, base_name, signature_name):
-        if not signature_name:
-            return False
-        if not base_name:
-            return True
-        return signature_name.lower() not in base_name.lower() and base_name.lower() not in signature_name.lower()
 
     def _block_hint(self, block_index, total_blocks):
         """
@@ -389,14 +410,15 @@ class AttendancePipeline:
         self._log_stage("Post Processing", timings["Post Processing"])
 
         # -----------------------------
-        # Llama Row Recheck (independent second opinion on suspicious rows)
+        # Second-Opinion Recheck (independent second opinion on suspicious rows)
         #
         # Gated by recheck_utils' engine-agnostic outlier/format check
         # rather than ValidationEngine's cell_highlight -- recheck has to
         # run before validate_records() so its disagreement flags can
         # feed into that final flagging decision (see
-        # llama_vision_engine.py docstring for why an independent model,
-        # not Mistral re-reading itself, is used here).
+        # vision_recheck_engine.py docstring for why an independent model,
+        # not Mistral re-reading itself, is used here -- and for why that
+        # model itself has already had to be swapped once).
         # -----------------------------
         start = time.perf_counter()
 
@@ -416,6 +438,13 @@ class AttendancePipeline:
                 date_totals[d] = date_totals.get(d, 0) + 1
         date_seen = {}
 
+        # Collect every row/field that needs a second look first, rather
+        # than calling the recheck engine as each one is found -- see
+        # vision_recheck_engine.py's docstring for why one call per row
+        # blew through this model's per-minute token quota on a real
+        # page. All of them go to the engine together in one call below.
+        recheck_targets = []
+
         for record in records:
             if record.get("status") != STATUS_WORK:
                 continue
@@ -431,24 +460,34 @@ class AttendancePipeline:
                 )
                 disambiguator = f"{block_hint}, {occurrence_hint}" if block_hint else occurrence_hint
 
-            for field in ("in_time", "out_time"):
-                if not needs_recheck(record, field, outlier_ids):
-                    continue
+            fields_needed = [
+                field for field in ("in_time", "out_time")
+                if needs_recheck(record, field, outlier_ids)
+            ]
+            if fields_needed:
+                recheck_targets.append((record, date, disambiguator, fields_needed))
 
-                recheck = self.llama_vision_engine.recheck_row(
-                    deskewed_path, date, disambiguator
-                )
-                if recheck is None:
-                    continue
+        if recheck_targets:
+            batch_requests = [
+                (date, disambiguator) for _, date, disambiguator, _ in recheck_targets
+            ]
+            batch_results = self.vision_recheck_engine.recheck_rows(
+                deskewed_path, batch_requests
+            )
 
-                recheck_value = recheck.get(field, "") or ""
-                record[f"{field}_llama_recheck"] = recheck_value
-                record[f"{field}_ocr_disagreement"] = disagrees(
-                    record.get(field, ""), recheck_value
-                )
+            if batch_results is not None:
+                for (record, date, disambiguator, fields_needed), recheck in zip(
+                    recheck_targets, batch_results
+                ):
+                    for field in fields_needed:
+                        recheck_value = recheck.get(field, "") or ""
+                        record[f"{field}_recheck_value"] = recheck_value
+                        record[f"{field}_ocr_disagreement"] = disagrees(
+                            record.get(field, ""), recheck_value
+                        )
 
-        timings["Llama Row Recheck"] = time.perf_counter() - start
-        self._log_stage("Llama Row Recheck", timings["Llama Row Recheck"])
+        timings["Second-Opinion Recheck"] = time.perf_counter() - start
+        self._log_stage("Second-Opinion Recheck", timings["Second-Opinion Recheck"])
 
         # -----------------------------
         # Final Validation

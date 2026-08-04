@@ -51,6 +51,19 @@ def process_pdf(pipeline, pdf_path, progress_callback=None):
 
             pix.save(temp_image)
 
+            # Some scans have their content genuinely rotated 90 degrees
+            # from their own pixel dimensions with no EXIF/PDF rotation
+            # flag to signal it -- Mistral can still read some of a page
+            # in that state but unreliably drops a whole second employee's
+            # table. This mirrors AttendancePipeline._load_input's own PDF
+            # branch exactly; this loop is a separate implementation (used
+            # by both main.py and api.py for every real PDF run) that was
+            # missing this call entirely, which is why the same
+            # dropped-table symptom the rotation fix was built to solve
+            # kept recurring here even after that fix was verified against
+            # pipeline.run()'s PDF path.
+            temp_image = pipeline._correct_rotation(temp_image, temp_dir)
+
             # Some scans photograph two physical register pages at once
             # (a landscape spread) -- split those into independent
             # single-page images before OCR ever sees them (see
@@ -61,11 +74,11 @@ def process_pdf(pipeline, pdf_path, progress_callback=None):
 
             for sub_image in sub_images:
                 # A physical (half-)page is almost always one employee's
-                # records, but occasionally still holds two full tables
-                # side by side or in sequence (see
-                # MistralOCREngine._find_group_ranges/_find_headers) --
-                # process_page returns a list either way, so every block
-                # gets its own entry instead of silently keeping only one.
+                # records, but occasionally still holds two employees
+                # side by side or in sequence (see MistralOCREngine's
+                # _EXTRACTION_SCHEMA) -- process_page returns a list
+                # either way, so every block gets its own entry instead
+                # of silently keeping only one.
                 page_results = pipeline.process_page(sub_image)
 
                 for result in page_results:

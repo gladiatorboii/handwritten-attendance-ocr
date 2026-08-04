@@ -10,9 +10,10 @@ load_dotenv()
 # removed.
 MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "")
 
-# Row recheck (second opinion on flagged rows) is handled by Llama 4
-# Scout via Groq instead of Mistral rechecking itself -- see
-# llama_vision_engine.py for why an independent model catches more.
+# Row recheck (second opinion on flagged rows) is handled by Qwen 3.6
+# 27B via Groq instead of Mistral rechecking itself -- see
+# vision_recheck_engine.py for why an independent model catches more
+# (and why that model has already had to be swapped once).
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 
